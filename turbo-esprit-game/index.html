@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Turbo Circuit</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --ink:#e8e8e8;
+    --dim:#9a9a9a;
+    --panel:#1b1c1e;
+    --panel-edge:#3a3b3d;
+    --accent:#e8b23a;
+    --bad:#c94b4b;
+    --good:#5bc98a;
+  }
+  *{box-sizing:border-box}
+  html,body{
+    margin:0;height:100%;background:#000;color:var(--ink);
+    font-family:"Courier New",ui-monospace,monospace;
+    overflow:hidden;
+  }
+  #wrap{
+    position:relative;width:100vw;height:100vh;
+    display:flex;align-items:center;justify-content:center;
+    background:#000;
+  }
+  canvas{display:block;image-rendering:pixelated;background:#3a4048}
+  #scene{position:relative}
+
+  #hud{
+    position:absolute;left:0;right:0;top:0;
+    display:flex;justify-content:space-between;align-items:flex-start;
+    padding:8px 10px;pointer-events:none;
+    font-size:13px;letter-spacing:.5px;
+  }
+  .box{
+    background:rgba(10,10,12,.72);
+    border:1px solid var(--panel-edge);
+    padding:6px 10px;
+    min-width:120px;
+  }
+  .row{display:flex;justify-content:space-between;gap:10px;margin:2px 0}
+  .label{color:var(--dim)}
+  .bar{width:100px;height:8px;background:#111;border:1px solid #444;margin-top:2px}
+  .bar > i{display:block;height:100%;background:var(--good)}
+  #fuelbar.low > i{background:var(--bad)}
+  #minimap{border:1px solid var(--panel-edge);background:rgba(10,10,12,.72)}
+
+  #banner{
+    position:absolute;left:50%;top:38%;transform:translate(-50%,-50%);
+    text-align:center;pointer-events:none;
+  }
+  #banner .msg{
+    font-size:15px;color:var(--accent);
+    text-shadow:0 0 6px rgba(0,0,0,.8);
+  }
+
+  #overlay{
+    position:absolute;inset:0;background:rgba(0,0,0,.86);
+    display:flex;align-items:center;justify-content:center;
+  }
+  #overlay.hidden{display:none}
+  .panel{
+    border:1px solid var(--panel-edge);background:var(--panel);
+    padding:26px 32px;max-width:420px;text-align:center;
+  }
+  .panel h1{
+    margin:0 0 6px;color:var(--accent);letter-spacing:2px;font-size:22px;
+  }
+  .panel h2{margin:0 0 14px;color:var(--dim);font-weight:normal;font-size:13px;letter-spacing:1px}
+  .panel p{font-size:12.5px;line-height:1.6;color:#cfcfcf;text-align:left}
+  .panel .keys{color:var(--accent)}
+  .panel .go{
+    margin-top:16px;font-size:13px;color:#111;background:var(--accent);
+    padding:8px 18px;display:inline-block;letter-spacing:1px;cursor:default;
+  }
+  .stat{color:var(--good)}
+  .flash{animation:flash 1s steps(2) infinite}
+  @keyframes flash{50%{opacity:.25}}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="scene">
+    <canvas id="c" width="800" height="500"></canvas>
+    <div id="hud">
+      <div class="box">
+        <div class="row"><span class="label">SPEED</span><span id="hudSpeed">000</span></div>
+        <div class="row"><span class="label">FUEL</span></div>
+        <div id="fuelbar" class="bar"><i style="width:100%"></i></div>
+      </div>
+      <canvas id="minimap" width="140" height="140"></canvas>
+      <div class="box" style="text-align:right">
+        <div class="row"><span class="label">TIME</span><span id="hudTime">00</span></div>
+        <div class="row"><span class="label">SCORE</span><span id="hudScore">0</span></div>
+        <div class="row"><span class="label">CAUGHT</span><span id="hudCaught">0</span></div>
+      </div>
+    </div>
+    <div id="banner"><div class="msg" id="bannerMsg"></div></div>
+
+    <div id="overlay">
+      <div class="panel" id="panelStart">
+        <h1>TURBO CIRCUIT</h1>
+        <h2>a tribute to Turbo Esprit (ZX Spectrum, 1986)</h2>
+        <p>
+          Drive the grey city grid and run down the amber
+          <b>suspect car</b> before your fuel or the clock runs out.
+          Get close at speed to make the bust. Clip a building and
+          you'll stall; clip a <b style="color:#6fa8ff">police car</b>
+          and you'll lose time. Cross a pale <b>fuel pad</b> to refill.
+        </p>
+        <p>
+          <span class="keys">&uarr; / W</span> accelerate&nbsp;&nbsp;
+          <span class="keys">&darr; / S</span> brake / reverse<br>
+          <span class="keys">&larr; &rarr; / A D</span> steer&nbsp;&nbsp;
+          <span class="keys">R</span> restart
+        </p>
+        <div class="go" id="btnStart">PRESS ENTER OR CLICK TO DRIVE</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+// ---------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------
+const BLOCKS_X = 9, BLOCKS_Z = 9;
+const BLOCK = 220;                 // grid spacing
+const BUILD_HALF = 68;             // building footprint half-size (leaves street gaps)
+const RENDER_DIST = 1000;
+const NEAR = 4;
+const FOV_FOCAL = 260;
+const HORIZON_Y = 205;
+const CAM_HEIGHT = 34;
+const CAM_BACK = 30;
+const CATCH_RADIUS = 22;
+const START_TIME = 95;
+const CATCH_BONUS_TIME = 16;
+const START_FUEL = 100;
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const mapCanvas = document.getElementById('minimap');
+const mctx = mapCanvas.getContext('2d');
+
+const worldHalfX = (BLOCKS_X * BLOCK) / 2;
+const worldHalfZ = (BLOCKS_Z * BLOCK) / 2;
+
+// ---------------------------------------------------------------
+// City generation
+// ---------------------------------------------------------------
+let buildings = [];   // {x1,x2,z1,z2,h,shade}
+let gasPads = [];     // {x,z,r}
+let streetLinesX = [];
+let streetLinesZ = [];
+
+function cellCenter(i, n){ return (i - n/2 + 0.5) * BLOCK; }
+
+function generateCity(seed){
+  buildings = [];
+  gasPads = [];
+  let rnd = mulberry32(seed);
+  for(let i=0;i<BLOCKS_X;i++){
+    for(let j=0;j<BLOCKS_Z;j++){
+      const cx = cellCenter(i, BLOCKS_X);
+      const cz = cellCenter(j, BLOCKS_Z);
+      const isGas = (i % 4 === 2 && j % 4 === 2);
+      if(isGas){
+        gasPads.push({x:cx, z:cz, r:46});
+        continue;
+      }
+      const h = 55 + rnd()*190;
+      const shade = 0.55 + rnd()*0.3;
+      buildings.push({
+        x1:cx-BUILD_HALF, x2:cx+BUILD_HALF,
+        z1:cz-BUILD_HALF, z2:cz+BUILD_HALF,
+        h, shade
+      });
+    }
+  }
+  streetLinesX = [];
+  streetLinesZ = [];
+  for(let i=0;i<=BLOCKS_X;i++) streetLinesX.push((i-BLOCKS_X/2)*BLOCK);
+  for(let j=0;j<=BLOCKS_Z;j++) streetLinesZ.push((j-BLOCKS_Z/2)*BLOCK);
+}
+
+function mulberry32(a){
+  return function(){
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function nearestStreet(list, v){
+  let best = list[0], bd = Infinity;
+  for(const s of list){ const d = Math.abs(s-v); if(d<bd){bd=d;best=s;} }
+  return best;
+}
+
+// ---------------------------------------------------------------
+// Entities
+// ---------------------------------------------------------------
+function makeCar(x,z,heading,color,maxSpeed){
+  return {x,z,heading,speed:0,color,maxSpeed,
+           axis:'z', dir:1, turnCooldown:0, alive:true};
+}
+
+let player, suspect, police, particles;
+let score, caught, timeLeft, fuel, gameState, roundLevel;
+let lastSuspectSpawnGuardTimer = 0;
+let bannerTimer = 0;
+
+function spawnPlayerStart(){
+  // spawn at a street intersection, which is always clear of buildings
+  const x = nearestStreet(streetLinesX, 0);
+  const z = nearestStreet(streetLinesZ, -worldHalfZ+150);
+  const car = makeCar(x, z, 0, '#e8e8e8', 220);
+  car.crashCooldown = 0;
+  return car;
+}
+
+function resetGame(){
+  document.getElementById('overlay').classList.add('hidden');
+  generateCity(Date.now() % 100000);
+  player = spawnPlayerStart();
+  score = 0; caught = 0; timeLeft = START_TIME; fuel = START_FUEL;
+  roundLevel = 0;
+  suspect = null;
+  police = [];
+  for(let i=0;i<3;i++){
+    police.push(spawnStreetCar('#6fa8ff', 95));
+  }
+  spawnSuspect();
+  gameState = 'playing';
+  showBanner('GO!', 1.2);
+}
+
+function randomStreetPoint(){
+  const x = nearestStreet(streetLinesX, (Math.random()*2-1)*worldHalfX);
+  const z = nearestStreet(streetLinesZ, (Math.random()*2-1)*worldHalfZ);
+  return {x,z};
+}
+
+function spawnStreetCar(color, speed){
+  const p = randomStreetPoint();
+  const c = makeCar(p.x, p.z, Math.random()<0.5?0:Math.PI, color, speed);
+  c.axis = Math.random()<0.5 ? 'x' : 'z';
+  c.dir = Math.random()<0.5 ? 1 : -1;
+  c.heading = c.axis==='z' ? (c.dir>0?0:Math.PI) : (c.dir>0?Math.PI/2:-Math.PI/2);
+  return c;
+}
+
+function spawnSuspect(){
+  roundLevel++;
+  suspect = spawnStreetCar('#e8b23a', 118 + roundLevel*7);
+  // keep it away from the player a bit
+  let tries = 0;
+  while(dist2(suspect.x,suspect.z,player.x,player.z) < 300*300 && tries<20){
+    const p = randomStreetPoint();
+    suspect.x = p.x; suspect.z = p.z; tries++;
+  }
+}
+
+function dist2(x1,z1,x2,z2){ const dx=x1-x2, dz=z1-z2; return dx*dx+dz*dz; }
+
+// ---------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------
+const keys = {};
+window.addEventListener('keydown', e=>{
+  keys[e.key.toLowerCase()] = true;
+  if(e.key==='Enter' && gameState==='start') startGame();
+  if((e.key==='r'||e.key==='R') && (gameState==='over'||gameState==='playing')) resetGame();
+  if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase())) e.preventDefault();
+});
+window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
+
+document.getElementById('btnStart').addEventListener('click', startGame);
+document.getElementById('wrap').addEventListener('click', ()=>{ if(gameState==='start') startGame(); });
+
+function startGame(){
+  document.getElementById('overlay').classList.add('hidden');
+  resetGame();
+}
+
+// ---------------------------------------------------------------
+// Physics / AI update
+// ---------------------------------------------------------------
+function updatePlayer(dt){
+  const accel = keys['arrowup']||keys['w'];
+  const brake = keys['arrowdown']||keys['s'];
+  const left  = keys['arrowleft']||keys['a'];
+  const right = keys['arrowright']||keys['d'];
+
+  if(accel) player.speed += 150*dt;
+  else if(brake) player.speed -= 220*dt;
+  else player.speed -= Math.sign(player.speed)*55*dt;
+
+  player.speed = clamp(player.speed, -90, player.maxSpeed);
+  if(Math.abs(player.speed) < 2 && !accel && !brake) player.speed = 0;
+
+  const steerAmt = 0.85 * dt * clamp(Math.abs(player.speed)/80, 0.3, 1.0) * Math.sign(player.speed||1);
+  if(left)  player.heading -= steerAmt;
+  if(right) player.heading += steerAmt;
+
+  const nx = player.x + Math.sin(player.heading)*player.speed*dt;
+  const nz = player.z + Math.cos(player.heading)*player.speed*dt;
+  const CAR_R = 9;
+
+  // axis-separated collision so the car slides along walls instead of
+  // freezing in place when it grazes a building
+  let hit = false;
+  let rx = player.x, rz = player.z;
+  if(collideBuildings(nx, rz, CAR_R)) hit = true; else rx = nx;
+  if(collideBuildings(rx, nz, CAR_R)) hit = true; else rz = nz;
+
+  player.x = clamp(rx, -worldHalfX+20, worldHalfX-20);
+  player.z = clamp(rz, -worldHalfZ+20, worldHalfZ-20);
+
+  player.crashCooldown -= dt;
+  if(hit){
+    player.speed *= 0.55;
+    if(player.crashCooldown <= 0){
+      fuel -= 3;
+      showBanner('CRASH!', 0.6);
+      player.crashCooldown = 0.8;
+    }
+  }
+
+  fuel -= dt * (1.1 + Math.abs(player.speed)/260*3.2);
+  fuel = clamp(fuel, 0, 100);
+
+  for(const pad of gasPads){
+    if(dist2(player.x,player.z,pad.x,pad.z) < pad.r*pad.r){
+      if(fuel < 99.5) showBanner('REFUELED', 0.8);
+      fuel = 100;
+    }
+  }
+}
+
+function collideBuildings(x, z, r){
+  for(const b of buildings){
+    const cx = clamp(x, b.x1, b.x2);
+    const cz = clamp(z, b.z1, b.z2);
+    if(dist2(x,z,cx,cz) < r*r) return b;
+  }
+  return null;
+}
+
+function updateStreetCar(car, dt){
+  const nx = car.x + Math.sin(car.heading)*car.speed*dt;
+  const nz = car.z + Math.cos(car.heading)*car.speed*dt;
+  car.x = nx; car.z = nz;
+
+  car.turnCooldown -= dt;
+  const moving = car.axis==='z' ? car.z : car.x;
+  const lines = car.axis==='z' ? streetLinesZ : streetLinesX;
+  for(const line of lines){
+    if(Math.abs(moving-line) < 4 && car.turnCooldown<=0){
+      car.turnCooldown = 1.0;
+      const r = Math.random();
+      if(r < 0.55){
+        // continue straight
+      } else {
+        car.axis = car.axis==='z' ? 'x' : 'z';
+        car.dir = Math.random()<0.5?1:-1;
+        car.heading = car.axis==='z' ? (car.dir>0?0:Math.PI) : (car.dir>0?Math.PI/2:-Math.PI/2);
+      }
+      break;
+    }
+  }
+  car.x = clamp(car.x, -worldHalfX+10, worldHalfX-10);
+  car.z = clamp(car.z, -worldHalfZ+10, worldHalfZ-10);
+}
+
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+
+function update(dt){
+  if(gameState !== 'playing') return;
+
+  updatePlayer(dt);
+  updateStreetCar(suspect, dt);
+  for(const p of police) updateStreetCar(p, dt);
+
+  for(const p of police){
+    if(dist2(player.x,player.z,p.x,p.z) < 26*26){
+      timeLeft -= 4;
+      player.speed *= 0.3;
+      showBanner('POLICE! -4s', 0.9);
+    }
+  }
+
+  if(dist2(player.x,player.z,suspect.x,suspect.z) < CATCH_RADIUS*CATCH_RADIUS
+     && Math.abs(player.speed) > 40){
+    score += 100 * roundLevel;
+    caught++;
+    timeLeft = Math.min(timeLeft + CATCH_BONUS_TIME, 999);
+    showBanner('BUSTED! +' + (100*roundLevel), 1.1);
+    spawnSuspect();
+  }
+
+  timeLeft -= dt;
+  if(timeLeft <= 0 || fuel <= 0){
+    gameState = 'over';
+    showEndPanel(fuel<=0 ? 'OUT OF FUEL' : "TIME'S UP");
+  }
+
+  bannerTimer -= dt;
+}
+
+function showBanner(msg, secs){
+  document.getElementById('bannerMsg').textContent = msg;
+  bannerTimer = secs;
+}
+
+function showEndPanel(reason){
+  const overlay = document.getElementById('overlay');
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <div class="panel">
+      <h1>${reason}</h1>
+      <h2>run complete</h2>
+      <p style="text-align:center">
+        Suspects busted: <span class="stat">${caught}</span><br>
+        Final score: <span class="stat">${score}</span>
+      </p>
+      <div class="go" id="btnRetry">PRESS R OR CLICK TO DRIVE AGAIN</div>
+    </div>`;
+  document.getElementById('btnRetry').addEventListener('click', ()=>{
+    overlay.classList.add('hidden');
+    resetGame();
+  });
+}
+
+// ---------------------------------------------------------------
+// Rendering — pseudo-3D chase camera
+// ---------------------------------------------------------------
+function project(px, py, pz, cam){
+  let dx = px - cam.x, dy = py - cam.y, dz = pz - cam.z;
+  const s = Math.sin(-cam.heading), c = Math.cos(-cam.heading);
+  const rx = dx*c - dz*s;
+  const rz = dx*s + dz*c;
+  const p = cam.pitch;
+  const sp = Math.sin(p), cp = Math.cos(p);
+  const ry = dy*cp - rz*sp;
+  const rz2 = dy*sp + rz*cp;
+  if(rz2 <= NEAR) return null;
+  return {
+    x: W/2 + (rx/rz2) * FOV_FOCAL,
+    y: HORIZON_Y - (ry/rz2) * FOV_FOCAL,
+    depth: rz2
+  };
+}
+
+function projectFace(pts, cam){
+  const out = [];
+  for(const [x,y,z] of pts){
+    const p = project(x,y,z,cam);
+    if(!p) return null;
+    out.push(p);
+  }
+  return out;
+}
+
+function polyFill(pts, color, stroke){
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  if(stroke){ ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+}
+
+function shadeColor(base, k){
+  // base is [r,g,b]
+  const r = clamp(Math.round(base[0]*k),0,255);
+  const g = clamp(Math.round(base[1]*k),0,255);
+  const b = clamp(Math.round(base[2]*k),0,255);
+  return `rgb(${r},${g},${b})`;
+}
+
+function buildingFaces(b, cam){
+  const faces = [];
+  const grey = [190,192,196];
+  // side facing camera on x axis
+  if(cam.x < b.x1){
+    faces.push({pts:[[b.x1,0,b.z1],[b.x1,b.h,b.z1],[b.x1,b.h,b.z2],[b.x1,0,b.z2]], k:b.shade*0.85});
+  } else if(cam.x > b.x2){
+    faces.push({pts:[[b.x2,0,b.z2],[b.x2,b.h,b.z2],[b.x2,b.h,b.z1],[b.x2,0,b.z1]], k:b.shade*0.85});
+  }
+  if(cam.z < b.z1){
+    faces.push({pts:[[b.x2,0,b.z1],[b.x2,b.h,b.z1],[b.x1,b.h,b.z1],[b.x1,0,b.z1]], k:b.shade*1.05});
+  } else if(cam.z > b.z2){
+    faces.push({pts:[[b.x1,0,b.z2],[b.x1,b.h,b.z2],[b.x2,b.h,b.z2],[b.x2,0,b.z2]], k:b.shade*1.05});
+  }
+  if(cam.y < b.h){
+    faces.push({pts:[[b.x1,b.h,b.z1],[b.x2,b.h,b.z1],[b.x2,b.h,b.z2],[b.x1,b.h,b.z2]], k:b.shade*1.15});
+  }
+  return faces.map(f=>({pts:f.pts, color: shadeColor(grey, f.k)}));
+}
+
+function carBodyQuads(car, cam){
+  // simple box car: length along heading, width across
+  const len = 16, wid = 9, h = 9;
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function toWorld(lx, lz){
+    return [car.x + (lx*c + lz*s), 0, car.z + (-lx*s + lz*c)];
+  }
+  const corners2D = [ [-wid,-len], [wid,-len], [wid,len], [-wid,len] ];
+  const base = corners2D.map(([lx,lz])=>toWorld(lx,lz));
+  const top = base.map(([x,y,z])=>[x,h,z]);
+  const quads = [
+    {pts:[base[0],top[0],top[1],base[1]], k:1.0},  // back
+    {pts:[base[1],top[1],top[2],base[2]], k:0.9},  // right
+    {pts:[base[2],top[2],top[3],base[3]], k:1.0},  // front
+    {pts:[base[3],top[3],top[0],base[0]], k:0.9},  // left
+    {pts:[top[0],top[1],top[2],top[3]], k:1.15},   // roof
+  ];
+  return quads;
+}
+
+function carColorRGB(hex){
+  const n = parseInt(hex.slice(1),16);
+  return [(n>>16)&255, (n>>8)&255, n&255];
+}
+
+function drawScene(){
+  // sky
+  const grad = ctx.createLinearGradient(0,0,0,HORIZON_Y);
+  grad.addColorStop(0, '#4b5560');
+  grad.addColorStop(1, '#7c8894');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0,0,W,HORIZON_Y);
+  // ground
+  ctx.fillStyle = '#4a4c4f';
+  ctx.fillRect(0,HORIZON_Y,W,H-HORIZON_Y);
+  // subtle ground shading
+  const g2 = ctx.createLinearGradient(0,HORIZON_Y,0,H);
+  g2.addColorStop(0,'rgba(0,0,0,0.25)');
+  g2.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle = g2;
+  ctx.fillRect(0,HORIZON_Y,W,H-HORIZON_Y);
+
+  const cam = {
+    x: player.x - Math.sin(player.heading)*CAM_BACK,
+    z: player.z - Math.cos(player.heading)*CAM_BACK,
+    y: CAM_HEIGHT,
+    heading: player.heading,
+    pitch: -0.09
+  };
+
+  // gas pads as flat ground markers
+  for(const pad of gasPads){
+    if(dist2(cam.x,cam.z,pad.x,pad.z) > RENDER_DIST*RENDER_DIST) continue;
+    const pts = [[pad.x-40,0.2,pad.z-40],[pad.x+40,0.2,pad.z-40],[pad.x+40,0.2,pad.z+40],[pad.x-40,0.2,pad.z+40]];
+    const proj = projectFace(pts, cam);
+    if(proj) polyFill(proj, 'rgba(210,205,180,0.55)', null);
+  }
+
+  // collect drawables
+  const drawables = [];
+  for(const b of buildings){
+    const bx = (b.x1+b.x2)/2, bz=(b.z1+b.z2)/2;
+    const d = dist2(cam.x,cam.z,bx,bz);
+    if(d > RENDER_DIST*RENDER_DIST) continue;
+    drawables.push({depth:d, faces: buildingFaces(b, cam)});
+  }
+  const allCars = [player, suspect, ...police];
+  for(const car of allCars){
+    const d = dist2(cam.x,cam.z,car.x,car.z);
+    const rgb = carColorRGB(car.color);
+    const quads = carBodyQuads(car, cam).map(q=>({pts:q.pts, color:shadeColor(rgb,q.k)}));
+    drawables.push({depth:d, faces:quads, isCar:true});
+  }
+
+  drawables.sort((a,b)=>b.depth - a.depth);
+  for(const d of drawables){
+    for(const f of d.faces){
+      const proj = projectFace(f.pts, cam);
+      if(!proj) continue;
+      polyFill(proj, f.color, d.isCar ? 'rgba(0,0,0,0.55)' : 'rgba(20,20,22,0.65)');
+    }
+  }
+}
+
+function drawMinimap(){
+  mctx.fillStyle = '#141517';
+  mctx.fillRect(0,0,140,140);
+  const scale = 140 / (BLOCKS_X*BLOCK);
+  const ox = 70, oz = 70;
+  mctx.fillStyle = '#3a3d41';
+  for(const b of buildings){
+    const x = ox + b.x1*scale, y = oz + b.z1*scale;
+    const w = (b.x2-b.x1)*scale, h = (b.z2-b.z1)*scale;
+    mctx.fillRect(x,y,w,h);
+  }
+  mctx.fillStyle = 'rgba(220,210,170,0.7)';
+  for(const pad of gasPads){
+    mctx.fillRect(ox+(pad.x-30)*scale, oz+(pad.z-30)*scale, 60*scale, 60*scale);
+  }
+  function dot(car, color, r){
+    mctx.fillStyle = color;
+    mctx.beginPath();
+    mctx.arc(ox+car.x*scale, oz+car.z*scale, r, 0, Math.PI*2);
+    mctx.fill();
+  }
+  for(const p of police) dot(p, '#6fa8ff', 2.4);
+  if(suspect) dot(suspect, '#e8b23a', 2.6);
+  dot(player, '#ffffff', 3);
+}
+
+function updateHUD(){
+  document.getElementById('hudSpeed').textContent = String(Math.round(Math.abs(player.speed))).padStart(3,'0');
+  document.getElementById('hudTime').textContent = String(Math.max(0,Math.ceil(timeLeft)));
+  document.getElementById('hudScore').textContent = score;
+  document.getElementById('hudCaught').textContent = caught;
+  const bar = document.getElementById('fuelbar');
+  bar.querySelector('i').style.width = clamp(fuel,0,100)+'%';
+  bar.classList.toggle('low', fuel < 25);
+  const bm = document.getElementById('bannerMsg');
+  bm.style.opacity = bannerTimer > 0 ? '1' : '0';
+}
+
+// ---------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------
+let lastT = performance.now();
+function frame(t){
+  const dt = Math.min(0.05, (t-lastT)/1000);
+  lastT = t;
+  update(dt);
+  if(player){
+    drawScene();
+    drawMinimap();
+    updateHUD();
+  }
+  requestAnimationFrame(frame);
+}
+
+// initial static city behind the start screen
+generateCity(1);
+player = spawnPlayerStart();
+suspect = spawnStreetCar('#e8b23a', 120);
+police = [spawnStreetCar('#6fa8ff', 90)];
+score = 0; caught = 0; timeLeft = START_TIME; fuel = START_FUEL;
+gameState = 'start';
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
