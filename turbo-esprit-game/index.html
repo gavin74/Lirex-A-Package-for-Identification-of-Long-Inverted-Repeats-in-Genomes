@@ -64,6 +64,7 @@
   .bar > i{display:block;height:100%;background:var(--good)}
   #fuelbar.low > i{background:var(--bad)}
   #minimap{border:1px solid var(--panel-edge);background:rgba(8,9,10,.76)}
+  .clickable{cursor:pointer;pointer-events:auto;color:var(--good)}
 
   #banner{
     position:absolute;left:50%;top:38%;transform:translate(-50%,-50%);
@@ -119,6 +120,7 @@
         <div class="row"><span class="label">TIME</span><span id="hudTime">00</span></div>
         <div class="row"><span class="label">SCORE</span><span id="hudScore">0</span></div>
         <div class="row"><span class="label">CAUGHT</span><span id="hudCaught">0</span></div>
+        <div class="row"><span class="label">SOUND (M)</span><span id="hudSound" class="clickable">ON</span></div>
       </div>
     </div>
     <div id="banner"><div class="msg" id="bannerMsg"></div></div>
@@ -182,6 +184,7 @@ const worldHalfZ = (BLOCKS_Z * BLOCK) / 2;
 // ---------------------------------------------------------------
 let buildings = [];   // {x1,x2,z1,z2,h,shade}
 let gasPads = [];     // {x,z,r}
+let roadMarks = [];   // {x1,x2,z1,z2} dashed centerline segments
 let streetLinesX = [];
 let streetLinesZ = [];
 
@@ -213,6 +216,19 @@ function generateCity(seed){
   streetLinesZ = [];
   for(let i=0;i<=BLOCKS_X;i++) streetLinesX.push((i-BLOCKS_X/2)*BLOCK);
   for(let j=0;j<=BLOCKS_Z;j++) streetLinesZ.push((j-BLOCKS_Z/2)*BLOCK);
+
+  roadMarks = [];
+  const dashLen = 20, dashGap = 22, dashHalfWid = 1.4;
+  for(const x of streetLinesX){
+    for(let z=-worldHalfZ+dashGap; z<worldHalfZ; z+=dashLen+dashGap){
+      roadMarks.push({x1:x-dashHalfWid, x2:x+dashHalfWid, z1:z, z2:z+dashLen});
+    }
+  }
+  for(const z of streetLinesZ){
+    for(let x=-worldHalfX+dashGap; x<worldHalfX; x+=dashLen+dashGap){
+      roadMarks.push({x1:x, x2:x+dashLen, z1:z-dashHalfWid, z2:z+dashHalfWid});
+    }
+  }
 }
 
 function mulberry32(a){
@@ -304,6 +320,7 @@ window.addEventListener('keydown', e=>{
   keys[e.key.toLowerCase()] = true;
   if(e.key==='Enter' && gameState==='start') startGame();
   if((e.key==='r'||e.key==='R') && (gameState==='over'||gameState==='playing')) resetGame();
+  if(e.key==='m'||e.key==='M') toggleMute();
   if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase())) e.preventDefault();
 });
 window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
@@ -313,8 +330,107 @@ document.getElementById('wrap').addEventListener('click', ()=>{ if(gameState==='
 
 function startGame(){
   document.getElementById('overlay').classList.add('hidden');
+  Engine.init();
   resetGame();
 }
+
+// ---------------------------------------------------------------
+// Engine sound — synthesized with the Web Audio API, no audio files.
+// Two detuned sawtooths + a sub square wave through a waveshaper and a
+// lowpass filter. Pitch rises with speed within a simulated gear, then
+// drops back down when the "ratio" resets, giving the classic
+// rising-then-shifting engine note; the filter opens up under throttle
+// for a rougher, roarier tone.
+// ---------------------------------------------------------------
+const Engine = (function(){
+  let ac = null, osc1, osc2, sub, filter, shaper, gainMaster;
+  let started = false, muted = false, currentVol = 0;
+
+  function distortionCurve(amount){
+    const n = 256, curve = new Float32Array(n);
+    for(let i=0;i<n;i++){
+      const x = i*2/n - 1;
+      curve[i] = Math.tanh(x*amount);
+    }
+    return curve;
+  }
+
+  function init(){
+    if(started) return;
+    started = true;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return;
+    ac = new AC();
+
+    osc1 = ac.createOscillator(); osc1.type = 'sawtooth';
+    osc2 = ac.createOscillator(); osc2.type = 'sawtooth'; osc2.detune.value = -9;
+    sub  = ac.createOscillator(); sub.type = 'square';
+
+    const mix = ac.createGain(); mix.gain.value = 1;
+    const subGain = ac.createGain(); subGain.gain.value = 0.35;
+    osc1.connect(mix); osc2.connect(mix);
+    sub.connect(subGain); subGain.connect(mix);
+
+    shaper = ac.createWaveShaper();
+    shaper.curve = distortionCurve(1.6);
+    mix.connect(shaper);
+
+    filter = ac.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 500;
+    filter.Q.value = 0.7;
+    shaper.connect(filter);
+
+    gainMaster = ac.createGain();
+    gainMaster.gain.value = 0;
+    filter.connect(gainMaster);
+    gainMaster.connect(ac.destination);
+
+    osc1.start(); osc2.start(); sub.start();
+    if(ac.state === 'suspended') ac.resume();
+  }
+
+  function setMuted(m){
+    muted = m;
+    if(gainMaster) gainMaster.gain.setTargetAtTime(m ? 0 : currentVol, ac.currentTime, 0.05);
+  }
+
+  function update(speed, maxSpeed, throttleOn, running){
+    if(!started || !ac) return;
+    if(ac.state === 'suspended') ac.resume();
+    const now = ac.currentTime;
+
+    if(!running){
+      gainMaster.gain.setTargetAtTime(0, now, 0.3);
+      return;
+    }
+
+    const spd = Math.abs(speed);
+    const GEARS = 4;
+    const span = maxSpeed / GEARS;
+    const gearPos = spd <= 1 ? 0 : (spd % span) / span;
+    const idleHz = 42, revHz = 145;
+    const baseHz = idleHz + gearPos * (revHz - idleHz);
+
+    osc1.frequency.setTargetAtTime(baseHz, now, 0.05);
+    osc2.frequency.setTargetAtTime(baseHz * 1.005, now, 0.05);
+    sub.frequency.setTargetAtTime(baseHz * 0.5, now, 0.05);
+
+    const throttleBoost = throttleOn ? 1 : 0;
+    filter.frequency.setTargetAtTime(500 + gearPos*1400 + throttleBoost*500, now, 0.08);
+
+    currentVol = 0.05 + Math.min(spd/maxSpeed, 1)*0.09 + throttleBoost*0.05;
+    gainMaster.gain.setTargetAtTime(muted ? 0 : currentVol, now, 0.08);
+  }
+
+  return { init, update, setMuted, get isMuted(){ return muted; } };
+})();
+
+function toggleMute(){
+  Engine.setMuted(!Engine.isMuted);
+  document.getElementById('hudSound').textContent = Engine.isMuted ? 'OFF' : 'ON';
+}
+document.getElementById('hudSound').addEventListener('click', toggleMute);
 
 // ---------------------------------------------------------------
 // Physics / AI update
@@ -369,6 +485,8 @@ function updatePlayer(dt){
       fuel = 100;
     }
   }
+
+  Engine.update(player.speed, player.maxSpeed, !!accel, true);
 }
 
 function collideBuildings(x, z, r){
@@ -435,6 +553,7 @@ function update(dt){
   timeLeft -= dt;
   if(timeLeft <= 0 || fuel <= 0){
     gameState = 'over';
+    Engine.update(0, 1, false, false);
     showEndPanel(fuel<=0 ? 'OUT OF FUEL' : "TIME'S UP");
   }
 
@@ -468,31 +587,57 @@ function showEndPanel(reason){
 // ---------------------------------------------------------------
 // Rendering — pseudo-3D chase camera
 // ---------------------------------------------------------------
-function project(px, py, pz, cam){
-  let dx = px - cam.x, dy = py - cam.y, dz = pz - cam.z;
-  const s = Math.sin(-cam.heading), c = Math.cos(-cam.heading);
+function toCamSpace(x, y, z, cam){
+  const dx = x - cam.x, dy = y - cam.y, dz = z - cam.z;
+  // rotate the world offset by the camera's heading (compass convention:
+  // heading 0 = +z/north, increasing clockwise toward +x/east — matching
+  // how the car's own forward vector (sin h, cos h) is defined)
+  const s = Math.sin(cam.heading), c = Math.cos(cam.heading);
   const rx = dx*c - dz*s;
   const rz = dx*s + dz*c;
   const p = cam.pitch;
   const sp = Math.sin(p), cp = Math.cos(p);
   const ry = dy*cp - rz*sp;
   const rz2 = dy*sp + rz*cp;
-  if(rz2 <= NEAR) return null;
+  return {x:rx, y:ry, z:rz2};
+}
+
+// Clip a convex polygon (already in camera space) against the near plane.
+// Without this, a face with just one corner behind the plane would get
+// discarded outright — which is why buildings used to visibly pop out of
+// existence as the camera got close to them.
+function clipNear(pts){
+  const out = [];
+  const n = pts.length;
+  for(let i=0;i<n;i++){
+    const cur = pts[i], prev = pts[(i-1+n)%n];
+    const curIn = cur.z > NEAR, prevIn = prev.z > NEAR;
+    if(curIn !== prevIn){
+      const t = (NEAR - prev.z) / (cur.z - prev.z);
+      out.push({
+        x: prev.x + (cur.x-prev.x)*t,
+        y: prev.y + (cur.y-prev.y)*t,
+        z: NEAR
+      });
+    }
+    if(curIn) out.push(cur);
+  }
+  return out;
+}
+
+function toScreen(p){
   return {
-    x: W/2 + (rx/rz2) * FOV_FOCAL,
-    y: HORIZON_Y - (ry/rz2) * FOV_FOCAL,
-    depth: rz2
+    x: W/2 + (p.x/p.z) * FOV_FOCAL,
+    y: HORIZON_Y - (p.y/p.z) * FOV_FOCAL
   };
 }
 
 function projectFace(pts, cam){
-  const out = [];
-  for(const [x,y,z] of pts){
-    const p = project(x,y,z,cam);
-    if(!p) return null;
-    out.push(p);
-  }
-  return out;
+  const camPts = pts.map(([x,y,z]) => toCamSpace(x,y,z,cam));
+  if(!camPts.some(p => p.z > NEAR)) return null;
+  const clipped = clipNear(camPts);
+  if(clipped.length < 3) return null;
+  return clipped.map(toScreen);
 }
 
 function polyFill(pts, color, stroke){
@@ -533,29 +678,64 @@ function buildingFaces(b, cam){
   return faces.map(f=>({pts:f.pts, color: shadeColor(grey, f.k)}));
 }
 
-function carBodyQuads(car, cam){
-  // simple box car: length along heading, width across
-  const len = 16, wid = 9, h = 9;
-  const s = Math.sin(car.heading), c = Math.cos(car.heading);
-  function toWorld(lx, lz){
-    return [car.x + (lx*c + lz*s), 0, car.z + (-lx*s + lz*c)];
-  }
-  const corners2D = [ [-wid,-len], [wid,-len], [wid,len], [-wid,len] ];
-  const base = corners2D.map(([lx,lz])=>toWorld(lx,lz));
-  const top = base.map(([x,y,z])=>[x,h,z]);
-  const quads = [
-    {pts:[base[0],top[0],top[1],base[1]], k:1.0},  // back
-    {pts:[base[1],top[1],top[2],base[2]], k:0.9},  // right
-    {pts:[base[2],top[2],top[3],base[3]], k:1.0},  // front
-    {pts:[base[3],top[3],top[0],base[0]], k:0.9},  // left
-    {pts:[top[0],top[1],top[2],top[3]], k:1.15},   // roof
-  ];
-  return quads;
-}
-
 function carColorRGB(hex){
   const n = parseInt(hex.slice(1),16);
   return [(n>>16)&255, (n>>8)&255, n&255];
+}
+
+// A small low-poly car: a chassis slab, a cabin/greenhouse with tinted
+// glass, headlight/taillight accents and tire hints at the corners.
+// Local car space: lz+ = nose (direction of travel), lx+ = right, ly = up.
+function buildCarQuads(car){
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, ly, lz){
+    return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)];
+  }
+
+  const rgb = carColorRGB(car.color);
+  const body = shadeColor(rgb, 1.0);
+  const bodyDark = shadeColor(rgb, 0.8);
+  const bodyLight = shadeColor(rgb, 1.18);
+  const glass = 'rgb(38,44,52)';
+  const tire = 'rgb(16,16,18)';
+  const headlight = 'rgb(255,248,222)';
+  const taillight = 'rgb(206,64,54)';
+
+  const HW = 7.5, NOSE = 15, TAIL = -15, CB = 3, CT = 9;
+  const quads = [];
+
+  // chassis
+  const cB = [tw(-HW,CB,TAIL), tw(HW,CB,TAIL), tw(HW,CB,NOSE), tw(-HW,CB,NOSE)];
+  const cT = [tw(-HW,CT,TAIL), tw(HW,CT,TAIL), tw(HW,CT,NOSE), tw(-HW,CT,NOSE)];
+  quads.push({pts:[cB[0],cT[0],cT[1],cB[1]], color:bodyDark});   // tail
+  quads.push({pts:[cB[1],cT[1],cT[2],cB[2]], color:bodyLight});  // right
+  quads.push({pts:[cB[2],cT[2],cT[3],cB[3]], color:body});       // nose
+  quads.push({pts:[cB[3],cT[3],cT[0],cB[0]], color:bodyDark});   // left
+  quads.push({pts:[cT[0],cT[1],cT[2],cT[3]], color:bodyLight});  // deck
+
+  // cabin / greenhouse, set back from the nose for a simple wedge silhouette
+  const CW = 5.6, CAB_N = 6, CAB_T = -9, RT = 15.5;
+  const gB = [tw(-CW,CT,CAB_T), tw(CW,CT,CAB_T), tw(CW,CT,CAB_N), tw(-CW,CT,CAB_N)];
+  const gT = [tw(-CW*0.75,RT,CAB_T+1.5), tw(CW*0.75,RT,CAB_T+1.5), tw(CW*0.75,RT,CAB_N-1.5), tw(-CW*0.75,RT,CAB_N-1.5)];
+  quads.push({pts:[gB[0],gT[0],gT[1],gB[1]], color:glass});      // rear window
+  quads.push({pts:[gB[1],gT[1],gT[2],gB[2]], color:bodyLight});  // right pillar
+  quads.push({pts:[gB[2],gT[2],gT[3],gB[3]], color:glass});      // windshield
+  quads.push({pts:[gB[3],gT[3],gT[0],gB[0]], color:bodyLight});  // left pillar
+  quads.push({pts:[gT[0],gT[1],gT[2],gT[3]], color:bodyLight});  // roof
+
+  // tail: lights + tire hints peeking below the bumper line
+  quads.push({pts:[tw(-HW+1.2,4.5,TAIL),tw(-4,4.5,TAIL),tw(-4,6.5,TAIL),tw(-HW+1.2,6.5,TAIL)], color:taillight});
+  quads.push({pts:[tw(4,4.5,TAIL),tw(HW-1.2,4.5,TAIL),tw(HW-1.2,6.5,TAIL),tw(4,6.5,TAIL)], color:taillight});
+  quads.push({pts:[tw(-HW,0,TAIL),tw(-HW+3,0,TAIL),tw(-HW+3,CB,TAIL),tw(-HW,CB,TAIL)], color:tire});
+  quads.push({pts:[tw(HW-3,0,TAIL),tw(HW,0,TAIL),tw(HW,CB,TAIL),tw(HW-3,CB,TAIL)], color:tire});
+
+  // nose: headlights + tire hints
+  quads.push({pts:[tw(-HW+1.2,4.5,NOSE),tw(-4,4.5,NOSE),tw(-4,6.5,NOSE),tw(-HW+1.2,6.5,NOSE)], color:headlight});
+  quads.push({pts:[tw(4,4.5,NOSE),tw(HW-1.2,4.5,NOSE),tw(HW-1.2,6.5,NOSE),tw(4,6.5,NOSE)], color:headlight});
+  quads.push({pts:[tw(-HW,0,NOSE),tw(-HW+3,0,NOSE),tw(-HW+3,CB,NOSE),tw(-HW,CB,NOSE)], color:tire});
+  quads.push({pts:[tw(HW-3,0,NOSE),tw(HW,0,NOSE),tw(HW,CB,NOSE),tw(HW-3,CB,NOSE)], color:tire});
+
+  return quads;
 }
 
 function drawScene(){
@@ -591,6 +771,16 @@ function drawScene(){
     if(proj) polyFill(proj, 'rgba(210,205,180,0.55)', null);
   }
 
+  // dashed road markings down the center of every street
+  const markRangeSq = (RENDER_DIST*0.55)*(RENDER_DIST*0.55);
+  for(const m of roadMarks){
+    const mx=(m.x1+m.x2)/2, mz=(m.z1+m.z2)/2;
+    if(dist2(cam.x,cam.z,mx,mz) > markRangeSq) continue;
+    const pts = [[m.x1,0.15,m.z1],[m.x2,0.15,m.z1],[m.x2,0.15,m.z2],[m.x1,0.15,m.z2]];
+    const proj = projectFace(pts, cam);
+    if(proj) polyFill(proj, 'rgba(224,222,208,0.8)', null);
+  }
+
   // collect drawables
   const drawables = [];
   for(const b of buildings){
@@ -602,9 +792,7 @@ function drawScene(){
   const allCars = [player, suspect, ...police];
   for(const car of allCars){
     const d = dist2(cam.x,cam.z,car.x,car.z);
-    const rgb = carColorRGB(car.color);
-    const quads = carBodyQuads(car, cam).map(q=>({pts:q.pts, color:shadeColor(rgb,q.k)}));
-    drawables.push({depth:d, faces:quads, isCar:true});
+    drawables.push({depth:d, faces:buildCarQuads(car), isCar:true});
   }
 
   drawables.sort((a,b)=>b.depth - a.depth);
