@@ -180,6 +180,18 @@ const TURN_RATE = 6;               // rad/sec the player's visual heading animat
 const JUNCTION_WINDOW = 30;        // how close to a crossing a turn can be started
 const FUEL_ENABLED = false;        // fuel management is parked for now
 
+// muted material tints a building can be built from — still a grey city,
+// but concrete, sandstone, slate and brick-grey read as different buildings
+// instead of one monotone repeated everywhere
+const BUILDING_TINTS = [
+  [190,192,196], // concrete
+  [198,188,170], // sandstone
+  [172,182,196], // cool blue-grey
+  [188,184,172], // beige
+  [168,172,176], // slate
+  [196,176,168], // brick-grey
+];
+
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 const W = canvas.width, H = canvas.height;
@@ -223,6 +235,7 @@ function generateCity(seed){
       else if(roll < 0.78) h = 78 + rnd()*95;
       else h = 175 + rnd()*165;
       const shade = 0.55 + rnd()*0.3;
+      const tint = BUILDING_TINTS[Math.floor(rnd()*BUILDING_TINTS.length)];
 
       const cols = 3 + Math.floor(rnd()*2);
       const rows = Math.max(1, Math.floor((h-24)/26));
@@ -237,7 +250,7 @@ function generateCity(seed){
       buildings.push({
         x1:cx-BUILD_HALF, x2:cx+BUILD_HALF,
         z1:cz-BUILD_HALF, z2:cz+BUILD_HALF,
-        h, shade, cols, rows, windows
+        h, shade, tint, cols, rows, windows
       });
     }
   }
@@ -421,16 +434,18 @@ function startGame(){
 
 // ---------------------------------------------------------------
 // Engine sound — synthesized with the Web Audio API, no audio files.
-// Two sawtooths (one quieter and lightly detuned) plus a triangle sub,
-// through gentle saturation into a lowpass filter whose cutoff TRACKS
-// the pitch — a formant that rises with RPM instead of sitting fixed,
-// which is what made the first version buzzy at every speed. A soft
-// idle "lope" (slow pitch wobble) fades out as revs climb, and a thin
-// layer of filtered noise rises with road speed to add texture without
-// leaning on harsh distortion to do it.
+// Deliberately simple: one sawtooth (all the harmonic "buzz" an engine
+// needs comes from a sawtooth on its own) plus a triangle sub an octave
+// down for weight, through light saturation into a lowpass filter whose
+// cutoff tracks the pitch. Earlier passes had two detuned sawtooths and
+// a very low (36Hz) fundamental; the detune added an audible phasey
+// warble and the low fundamental barely reproduces on small speakers,
+// which likely read as "thin"/"buzzy" rather than engine-like. This
+// version sits higher and louder so it's clearly audible, and drops the
+// second oscillator so there's nothing to beat against it.
 // ---------------------------------------------------------------
 const Engine = (function(){
-  let ac = null, osc1, osc2, sub, lfo, lfoGain;
+  let ac = null, osc, sub, lfo, lfoGain;
   let noiseSrc, noiseFilter, noiseGain;
   let shaper, filter, gainMaster;
   let started = false, muted = false, currentVol = 0;
@@ -463,31 +478,27 @@ const Engine = (function(){
     if(!AC) return;
     ac = new AC();
 
-    osc1 = ac.createOscillator(); osc1.type = 'sawtooth';
-    osc2 = ac.createOscillator(); osc2.type = 'sawtooth'; osc2.detune.value = -6;
-    sub  = ac.createOscillator(); sub.type = 'triangle';
+    osc = ac.createOscillator(); osc.type = 'sawtooth';
+    sub = ac.createOscillator(); sub.type = 'triangle';
 
-    lfo = ac.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 7;
-    lfoGain = ac.createGain(); lfoGain.gain.value = 1.2;
+    lfo = ac.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 6.5;
+    lfoGain = ac.createGain(); lfoGain.gain.value = 1.4;
     lfo.connect(lfoGain);
-    lfoGain.connect(osc1.frequency);
-    lfoGain.connect(osc2.frequency);
+    lfoGain.connect(osc.frequency);
 
     const mix = ac.createGain(); mix.gain.value = 1;
-    const osc2Gain = ac.createGain(); osc2Gain.gain.value = 0.55;
-    const subGain = ac.createGain(); subGain.gain.value = 0.6;
-    osc1.connect(mix);
-    osc2.connect(osc2Gain); osc2Gain.connect(mix);
+    const subGain = ac.createGain(); subGain.gain.value = 0.7;
+    osc.connect(mix);
     sub.connect(subGain); subGain.connect(mix);
 
     shaper = ac.createWaveShaper();
-    shaper.curve = softCurve(1.15);
+    shaper.curve = softCurve(0.9);
     mix.connect(shaper);
 
     filter = ac.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = 400;
-    filter.Q.value = 1.1;
+    filter.frequency.value = 600;
+    filter.Q.value = 1.0;
     shaper.connect(filter);
 
     gainMaster = ac.createGain();
@@ -509,7 +520,7 @@ const Engine = (function(){
 
     gainMaster.connect(ac.destination);
 
-    osc1.start(); osc2.start(); sub.start(); lfo.start(); noiseSrc.start();
+    osc.start(); sub.start(); lfo.start(); noiseSrc.start();
     if(ac.state === 'suspended') ac.resume();
   }
 
@@ -532,26 +543,25 @@ const Engine = (function(){
     const GEARS = 4;
     const span = maxSpeed / GEARS;
     const gearPos = spd <= 1 ? 0 : (spd % span) / span;
-    const idleHz = 36, revHz = 118;
+    const idleHz = 58, revHz = 205;
     const baseHz = idleHz + gearPos * (revHz - idleHz);
 
-    osc1.frequency.setTargetAtTime(baseHz, now, 0.07);
-    osc2.frequency.setTargetAtTime(baseHz * 1.004, now, 0.07);
-    sub.frequency.setTargetAtTime(baseHz * 0.5, now, 0.07);
+    osc.frequency.setTargetAtTime(baseHz, now, 0.06);
+    sub.frequency.setTargetAtTime(baseHz * 0.5, now, 0.06);
 
     // the idle lope smooths out once the engine is actually spinning
-    lfoGain.gain.setTargetAtTime(Math.max(0, 1.2*(1-gearPos*1.6)), now, 0.2);
+    lfoGain.gain.setTargetAtTime(Math.max(0, 1.4*(1-gearPos*1.6)), now, 0.2);
 
     const throttleBoost = throttleOn ? 1 : 0;
     // cutoff tracks the fundamental so the harmonic balance stays
     // consistent at any RPM instead of sounding buzzy at some and muffled
     // at others
-    filter.frequency.setTargetAtTime(baseHz*5 + 260 + throttleBoost*380, now, 0.1);
+    filter.frequency.setTargetAtTime(baseHz*6 + 320 + throttleBoost*450, now, 0.1);
 
     noiseFilter.frequency.setTargetAtTime(500 + spd*3.2, now, 0.15);
-    noiseGain.gain.setTargetAtTime(Math.min(spd/maxSpeed,1)*0.035, now, 0.15);
+    noiseGain.gain.setTargetAtTime(Math.min(spd/maxSpeed,1)*0.03, now, 0.15);
 
-    currentVol = 0.035 + Math.min(spd/maxSpeed, 1)*0.07 + throttleBoost*0.035;
+    currentVol = 0.07 + Math.min(spd/maxSpeed, 1)*0.11 + throttleBoost*0.05;
     gainMaster.gain.setTargetAtTime(muted ? 0 : currentVol, now, 0.1);
   }
 
@@ -688,8 +698,22 @@ function updateStreetCar(car, dt){
       break;
     }
   }
+  const beforeX = car.x, beforeZ = car.z;
   car.x = clamp(car.x, -worldHalfX+10, worldHalfX-10);
   car.z = clamp(car.z, -worldHalfZ+10, worldHalfZ-10);
+  if(car.x !== beforeX || car.z !== beforeZ){
+    // hit the edge of the map — the outermost street line sits too far
+    // from this clamp for the normal turn check above to ever catch it,
+    // so without this a car driving outward here would be stuck here
+    // forever. Force a 180 regardless of cooldown.
+    const idx = cardinalIndex(car.axis, car.dir);
+    const reversed = CARDINALS[(idx+2)%4];
+    car.axis = reversed.axis;
+    car.dir = reversed.dir;
+    car.heading = cardinalHeading(reversed.axis, reversed.dir);
+    car.targetHeading = car.heading;
+    car.turnCooldown = 1.0;
+  }
 }
 
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
@@ -886,24 +910,24 @@ function buildingWindows(b, faceAxis, constVal, lo, hi){
 
 function buildingFaces(b, cam, near){
   const faces = [];
-  const grey = [190,192,196];
+  const tint = b.tint;
   // side facing camera on x axis
   if(cam.x < b.x1){
-    faces.push({pts:[[b.x1,0,b.z1],[b.x1,b.h,b.z1],[b.x1,b.h,b.z2],[b.x1,0,b.z2]], color: shadeColor(grey, b.shade*0.85)});
+    faces.push({pts:[[b.x1,0,b.z1],[b.x1,b.h,b.z1],[b.x1,b.h,b.z2],[b.x1,0,b.z2]], color: shadeColor(tint, b.shade*0.85)});
     if(near) faces.push(...buildingWindows(b, 'x', b.x1, b.z1, b.z2));
   } else if(cam.x > b.x2){
-    faces.push({pts:[[b.x2,0,b.z2],[b.x2,b.h,b.z2],[b.x2,b.h,b.z1],[b.x2,0,b.z1]], color: shadeColor(grey, b.shade*0.85)});
+    faces.push({pts:[[b.x2,0,b.z2],[b.x2,b.h,b.z2],[b.x2,b.h,b.z1],[b.x2,0,b.z1]], color: shadeColor(tint, b.shade*0.85)});
     if(near) faces.push(...buildingWindows(b, 'x', b.x2, b.z1, b.z2));
   }
   if(cam.z < b.z1){
-    faces.push({pts:[[b.x2,0,b.z1],[b.x2,b.h,b.z1],[b.x1,b.h,b.z1],[b.x1,0,b.z1]], color: shadeColor(grey, b.shade*1.05)});
+    faces.push({pts:[[b.x2,0,b.z1],[b.x2,b.h,b.z1],[b.x1,b.h,b.z1],[b.x1,0,b.z1]], color: shadeColor(tint, b.shade*1.05)});
     if(near) faces.push(...buildingWindows(b, 'z', b.z1, b.x1, b.x2));
   } else if(cam.z > b.z2){
-    faces.push({pts:[[b.x1,0,b.z2],[b.x1,b.h,b.z2],[b.x2,b.h,b.z2],[b.x2,0,b.z2]], color: shadeColor(grey, b.shade*1.05)});
+    faces.push({pts:[[b.x1,0,b.z2],[b.x1,b.h,b.z2],[b.x2,b.h,b.z2],[b.x2,0,b.z2]], color: shadeColor(tint, b.shade*1.05)});
     if(near) faces.push(...buildingWindows(b, 'z', b.z2, b.x1, b.x2));
   }
   if(cam.y < b.h){
-    faces.push({pts:[[b.x1,b.h,b.z1],[b.x2,b.h,b.z1],[b.x2,b.h,b.z2],[b.x1,b.h,b.z2]], color: shadeColor(grey, b.shade*1.15)});
+    faces.push({pts:[[b.x1,b.h,b.z1],[b.x2,b.h,b.z1],[b.x2,b.h,b.z2],[b.x1,b.h,b.z2]], color: shadeColor(tint, b.shade*1.15)});
   }
   return faces;
 }
