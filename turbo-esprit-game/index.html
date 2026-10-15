@@ -410,15 +410,18 @@ function generateCity(seed){
     crossings.push({x:tl.x-30, z:tl.z, axis:'x'});
   }
 
-  // scattered road signs — purely decorative street furniture
+  // scattered road signs — purely decorative street furniture. Offset by
+  // the curb distance (not a small fixed number less than it), or they
+  // land out in the traffic lanes same as the traffic lights did.
   signs = [];
   const signRnd = mulberry32(seed + 777);
+  const curbOff = ROAD_HALF - 4;
   for(let k=0;k<14;k++){
     const ix = 1 + Math.floor(signRnd()*(streetLinesX.length-2));
     const iz = 1 + Math.floor(signRnd()*(streetLinesZ.length-2));
     signs.push({
-      x: streetLinesX[ix] + (signRnd()<0.5?-16:16),
-      z: streetLinesZ[iz] + (signRnd()<0.5?-16:16),
+      x: streetLinesX[ix] + (signRnd()<0.5?-curbOff:curbOff),
+      z: streetLinesZ[iz] + (signRnd()<0.5?-curbOff:curbOff),
       type: SIGN_TYPES[Math.floor(signRnd()*SIGN_TYPES.length)]
     });
   }
@@ -2583,7 +2586,11 @@ function trafficLightHeadQuads(px, pz, phase){
 }
 function buildTrafficLightQuads(tl){
   const phaseZ = trafficPhase('z', worldTime), phaseX = trafficPhase('x', worldTime);
-  return [...trafficLightHeadQuads(tl.x+12, tl.z-12, phaseZ), ...trafficLightHeadQuads(tl.x-12, tl.z+12, phaseX)];
+  // posts belong at the curb, not in the middle of the carriageway — this
+  // was sitting well inside the road (offset 12, when the road itself is
+  // ROAD_HALF=42 wide), effectively planted in the traffic lane
+  const off = ROAD_HALF - 4;
+  return [...trafficLightHeadQuads(tl.x+off, tl.z-off, phaseZ), ...trafficLightHeadQuads(tl.x-off, tl.z+off, phaseX)];
 }
 
 function buildZebraQuads(sx, sz, axis){
@@ -2692,45 +2699,50 @@ function buildRoundaboutQuads(rb){
 // their positions are a deterministic function of worldTime, walking back
 // and forth across each crossing (pedestrians) or bobbing near it (dogs).
 const PED_COLORS = ['rgb(60,70,90)','rgb(90,60,55)','rgb(55,80,65)','rgb(70,65,90)'];
+// A sine-based walk (not a linear bounce) naturally eases in and out at
+// each end the way a person slowing to turn around does, and every
+// pedestrian gets its own period so they all walk at different speeds
+// instead of in lockstep — a small deterministic hash off the index
+// stands in for per-pedestrian randomness.
+function walkPhase(i, t, basePeriod, spread){
+  const period = basePeriod + (i*37 % 100)/100*spread;
+  const ph = ((t + i*2.3) % period) / period;
+  return {ph, wave: Math.sin(ph*Math.PI*2), movingBack: Math.cos(ph*Math.PI*2) < 0};
+}
 function pedestrianPositions(){
   const list = [];
-  const period = 9;
   for(let i=0;i<crossings.length;i++){
     const cr = crossings[i];
-    const ph = ((worldTime + i*2.3) % period) / period;
-    const tri = ph < 0.5 ? ph*2 : 2-ph*2;
+    const {ph, wave, movingBack} = walkPhase(i, worldTime, 7, 9);
     const span = ROAD_HALF*2 - 10;
-    const off = -ROAD_HALF + 5 + tri*span;
+    const off = wave * span/2;
     const pos = cr.axis==='z' ? {x:cr.x+off, z:cr.z-8} : {x:cr.x-8, z:cr.z+off};
-    const facing = cr.axis==='z' ? Math.PI/2 : 0;
-    list.push({x:pos.x, z:pos.z, facing, color:PED_COLORS[i%PED_COLORS.length], walk:ph});
+    const baseFacing = cr.axis==='z' ? Math.PI/2 : 0;
+    list.push({x:pos.x, z:pos.z, facing: movingBack?baseFacing+Math.PI:baseFacing, color:PED_COLORS[i%PED_COLORS.length], walk:ph});
   }
   // sidewalk beats: a pedestrian ambling along the curb, parallel to the
   // street, not just crossing it — this is where "walking the dog" lives
-  const swPeriod = 11, swSpan = 46;
+  const swSpan = 46;
   for(let i=0;i<sidewalkBeats.length;i++){
     const sb = sidewalkBeats[i];
-    const ph = ((worldTime*0.8 + i*1.9) % swPeriod) / swPeriod;
-    const tri = ph < 0.5 ? ph*2 : 2-ph*2;
-    const off = -swSpan/2 + tri*swSpan;
+    const {ph, wave, movingBack} = walkPhase(i+100, worldTime*0.8, 9, 10);
+    const off = wave * swSpan/2;
     const pos = sb.axis==='z' ? {x:sb.x, z:sb.z+off} : {x:sb.x+off, z:sb.z};
-    const facing = sb.axis==='z' ? 0 : Math.PI/2;
-    list.push({x:pos.x, z:pos.z, facing, color:PED_COLORS[(i+2)%PED_COLORS.length], walk:ph, sidewalk:sb, swOff:off});
+    const baseFacing = sb.axis==='z' ? 0 : Math.PI/2;
+    list.push({x:pos.x, z:pos.z, facing: movingBack?baseFacing+Math.PI:baseFacing, color:PED_COLORS[(i+2)%PED_COLORS.length], walk:ph, sidewalk:sb, swOff:off});
   }
   return list;
 }
 function dogPositions(){
   const list = [];
-  const period = 6;
   for(let i=0;i<crossings.length;i++){
     const cr = crossings[i];
-    const ph = ((worldTime*1.3 + i*1.7 + 3) % period) / period;
-    const tri = ph < 0.5 ? ph*2 : 2-ph*2;
+    const {ph, wave, movingBack} = walkPhase(i+50, worldTime*1.3+3, 5, 4);
     const span = ROAD_HALF*2 - 16;
-    const off = -ROAD_HALF + 8 + tri*span;
+    const off = wave * span/2;
     const pos = cr.axis==='z' ? {x:cr.x+off, z:cr.z-4} : {x:cr.x-4, z:cr.z+off};
-    const facing = cr.axis==='z' ? Math.PI/2 : 0;
-    list.push({x:pos.x, z:pos.z, facing, walk:ph});
+    const baseFacing = cr.axis==='z' ? Math.PI/2 : 0;
+    list.push({x:pos.x, z:pos.z, facing: movingBack?baseFacing+Math.PI:baseFacing, walk:ph});
   }
   // dogs being walked on the sidewalk beats that have one, trailing just
   // behind their walker at the same pace — on an invisible leash
