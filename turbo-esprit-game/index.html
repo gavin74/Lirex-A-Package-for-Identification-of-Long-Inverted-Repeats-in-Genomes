@@ -832,30 +832,51 @@ const Engine = (function(){
 const SFX = (function(){
   function ctx(){ return Engine.getContext(); }
 
+  // a real impact now that you stop dead on one — bigger, with a sub-bass
+  // thump underneath the mid-range thud and a sharp crack layered on top
+  // of the crunch noise, not just a soft bump
   function crash(){
     const ac = ctx();
     if(!ac || Engine.isMuted) return;
     const now = ac.currentTime;
     const g = ac.createGain();
     g.gain.setValueAtTime(0.0001, now);
-    g.gain.linearRampToValueAtTime(0.32, now+0.012);
-    g.gain.exponentialRampToValueAtTime(0.001, now+0.26);
+    g.gain.linearRampToValueAtTime(0.55, now+0.01);
+    g.gain.exponentialRampToValueAtTime(0.001, now+0.4);
     g.connect(ac.destination);
 
     const thud = ac.createOscillator(); thud.type = 'triangle';
-    thud.frequency.setValueAtTime(150, now);
-    thud.frequency.exponentialRampToValueAtTime(38, now+0.2);
+    thud.frequency.setValueAtTime(160, now);
+    thud.frequency.exponentialRampToValueAtTime(34, now+0.24);
     thud.connect(g);
-    thud.start(now); thud.stop(now+0.22);
+    thud.start(now); thud.stop(now+0.26);
 
-    const len = Math.floor(ac.sampleRate*0.25);
+    const sub = ac.createOscillator(); sub.type = 'sine';
+    sub.frequency.setValueAtTime(70, now);
+    sub.frequency.exponentialRampToValueAtTime(24, now+0.3);
+    const subGain = ac.createGain(); subGain.gain.setValueAtTime(0.9, now);
+    sub.connect(subGain); subGain.connect(g);
+    sub.start(now); sub.stop(now+0.32);
+
+    const len = Math.floor(ac.sampleRate*0.35);
     const buf = ac.createBuffer(1, len, ac.sampleRate);
     const data = buf.getChannelData(0);
     for(let i=0;i<len;i++) data[i] = (Math.random()*2-1) * (1 - i/len);
     const noise = ac.createBufferSource(); noise.buffer = buf;
-    const nf = ac.createBiquadFilter(); nf.type = 'lowpass'; nf.frequency.value = 1000;
+    const nf = ac.createBiquadFilter(); nf.type = 'lowpass'; nf.frequency.value = 1400;
     noise.connect(nf); nf.connect(g);
     noise.start(now);
+
+    // a short sharp crack on top for the initial impact transient
+    const crackLen = Math.floor(ac.sampleRate*0.06);
+    const cbuf = ac.createBuffer(1, crackLen, ac.sampleRate);
+    const cdata = cbuf.getChannelData(0);
+    for(let i=0;i<crackLen;i++) cdata[i] = (Math.random()*2-1) * (1 - i/crackLen);
+    const crack = ac.createBufferSource(); crack.buffer = cbuf;
+    const cf = ac.createBiquadFilter(); cf.type = 'highpass'; cf.frequency.value = 1800;
+    const cg = ac.createGain(); cg.gain.setValueAtTime(0.5, now);
+    crack.connect(cf); cf.connect(cg); cg.connect(ac.destination);
+    crack.start(now);
   }
 
   function bust(){
@@ -1165,7 +1186,7 @@ function updatePlayer(dt){
   const brake = keys['arrowdown']||keys['s'];
   player.braking = !!brake;
 
-  if(accel) player.speed += 150*dt;
+  if(accel) player.speed += 95*dt; // slower buildup — was leaping to top speed almost instantly
   else if(brake) player.speed -= 220*dt;
   else player.speed -= Math.sign(player.speed)*80*dt; // more engine-braking bite, less coast-forever glide
 
@@ -1184,21 +1205,29 @@ function updatePlayer(dt){
   if(Math.abs(targetOffset-player.laneOffset) <= maxSlide) player.laneOffset = targetOffset;
   else player.laneOffset += Math.sign(targetOffset-player.laneOffset)*maxSlide;
 
+  // how far mid-turn the heading still has to catch up to its target —
+  // used below to gate the lane-change yaw and to drive the cornering lean
+  let headingGap = player.targetHeading - player.heading;
+  while(headingGap > Math.PI) headingGap -= Math.PI*2;
+  while(headingGap < -Math.PI) headingGap += Math.PI*2;
+  const turningNow = Math.abs(headingGap) > 0.05;
+
   // a lane change was a pure sideways glide before — no visible steering,
   // just the car crabbing sideways. This banks the car's rendered nose
   // (not its physics heading, so the camera stays steady) toward the lane
-  // it's actively sliding into, straightening out once it settles.
+  // it's actively sliding into, straightening out once it settles. Only
+  // while NOT also turning a corner — turnPlayer() reassigns player.lane
+  // to the new correct side the instant a turn fires, which used to spike
+  // this yaw at the same moment approachHeading and the roll below were
+  // also animating, reading as a jerky double-rotation.
   const laneVel = dt > 0 ? (player.laneOffset - prevLaneOffset) / dt : 0;
-  const yaw = clamp(laneVel / LANE_SPEED, -1, 1) * 0.3 * player.dir;
+  const yaw = turningNow ? 0 : clamp(laneVel / LANE_SPEED, -1, 1) * 0.3 * player.dir;
   player.visualHeading = player.heading + yaw;
 
   // a corner taken at speed banks the car over — "two wheels" lean. Driven
   // directly by how far mid-turn the heading still has to catch up to its
   // target, so it eases in and out with the same swing approachHeading
   // already animates, and only shows up when actually moving fast.
-  let headingGap = player.targetHeading - player.heading;
-  while(headingGap > Math.PI) headingGap -= Math.PI*2;
-  while(headingGap < -Math.PI) headingGap += Math.PI*2;
   const speedFrac = clamp(Math.abs(player.speed)/player.maxSpeed, 0, 1);
   player.roll = clamp(headingGap/(Math.PI/2), -1, 1) * 0.26 * speedFrac;
 
@@ -1232,7 +1261,7 @@ function updatePlayer(dt){
 
   player.crashCooldown -= dt;
   if(hit){
-    player.speed *= 0.55;
+    player.speed = 0; // stop dead on impact, not a damped carry-through
     if(player.crashCooldown <= 0){
       fuel -= 3;
       showBanner('CRASH!', 0.6);
