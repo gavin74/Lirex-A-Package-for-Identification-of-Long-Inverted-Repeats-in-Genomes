@@ -112,8 +112,10 @@
     <div id="hud">
       <div class="box">
         <div class="row"><span class="label">SPEED</span><span id="hudSpeed">000</span></div>
-        <div class="row"><span class="label">FUEL</span></div>
-        <div id="fuelbar" class="bar"><i style="width:100%"></i></div>
+        <div id="fuelWrap">
+          <div class="row"><span class="label">FUEL</span></div>
+          <div id="fuelbar" class="bar"><i style="width:100%"></i></div>
+        </div>
       </div>
       <canvas id="minimap" width="140" height="140"></canvas>
       <div class="box" style="text-align:right">
@@ -132,12 +134,11 @@
         <h2>a tribute to Turbo Esprit (ZX Spectrum, 1986)</h2>
         <p>
           Drive the grey city grid and run down the amber
-          <b>suspect car</b> before your fuel or the clock runs out.
+          <b>suspect car</b> before the clock runs out.
           Get close at speed to make the bust. Clip a building and
           you'll stall; clip a <b style="color:#6fa8ff">police car</b>,
           an <b style="color:#f0f0e6">ambulance</b> or a fast
           <b style="color:#ff6a3d">motorbike</b> and you'll lose time.
-          Cross a pale <b>fuel pad</b> to refill.
         </p>
         <p>
           <span class="keys">&uarr; / W</span> accelerate&nbsp;&nbsp;
@@ -177,6 +178,7 @@ const LANE_OFFSET = 16;            // distance of each lane from the street cent
 const LANE_SPEED = 70;             // lateral units/sec when changing lanes
 const TURN_RATE = 6;               // rad/sec the player's visual heading animates at
 const JUNCTION_WINDOW = 30;        // how close to a crossing a turn can be started
+const FUEL_ENABLED = false;        // fuel management is parked for now
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -208,15 +210,34 @@ function generateCity(seed){
       const cz = cellCenter(j, BLOCKS_Z);
       const isGas = (i % 4 === 2 && j % 4 === 2);
       if(isGas){
-        gasPads.push({x:cx, z:cz, r:46});
+        const pad = {x:cx, z:cz, r:46};
+        pad.quads = buildStationQuads(pad);
+        gasPads.push(pad);
         continue;
       }
-      const h = 55 + rnd()*190;
+      // a real skyline mix: mostly low- and mid-rise, with the occasional
+      // tower, rather than one smooth random range
+      const roll = rnd();
+      let h;
+      if(roll < 0.4) h = 34 + rnd()*44;
+      else if(roll < 0.78) h = 78 + rnd()*95;
+      else h = 175 + rnd()*165;
       const shade = 0.55 + rnd()*0.3;
+
+      const cols = 3 + Math.floor(rnd()*2);
+      const rows = Math.max(1, Math.floor((h-24)/26));
+      const litProb = 0.25 + rnd()*0.55;
+      const windows = [];
+      for(let r=0;r<rows;r++){
+        const row = [];
+        for(let c=0;c<cols;c++) row.push(rnd() < litProb);
+        windows.push(row);
+      }
+
       buildings.push({
         x1:cx-BUILD_HALF, x2:cx+BUILD_HALF,
         z1:cz-BUILD_HALF, z2:cz+BUILD_HALF,
-        h, shade
+        h, shade, cols, rows, windows
       });
     }
   }
@@ -387,6 +408,8 @@ window.addEventListener('keydown', e=>{
 });
 window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
 
+if(!FUEL_ENABLED) document.getElementById('fuelWrap').style.display = 'none';
+
 document.getElementById('btnStart').addEventListener('click', startGame);
 document.getElementById('wrap').addEventListener('click', ()=>{ if(gameState==='start') startGame(); });
 
@@ -398,23 +421,39 @@ function startGame(){
 
 // ---------------------------------------------------------------
 // Engine sound — synthesized with the Web Audio API, no audio files.
-// Two detuned sawtooths + a sub square wave through a waveshaper and a
-// lowpass filter. Pitch rises with speed within a simulated gear, then
-// drops back down when the "ratio" resets, giving the classic
-// rising-then-shifting engine note; the filter opens up under throttle
-// for a rougher, roarier tone.
+// Two sawtooths (one quieter and lightly detuned) plus a triangle sub,
+// through gentle saturation into a lowpass filter whose cutoff TRACKS
+// the pitch — a formant that rises with RPM instead of sitting fixed,
+// which is what made the first version buzzy at every speed. A soft
+// idle "lope" (slow pitch wobble) fades out as revs climb, and a thin
+// layer of filtered noise rises with road speed to add texture without
+// leaning on harsh distortion to do it.
 // ---------------------------------------------------------------
 const Engine = (function(){
-  let ac = null, osc1, osc2, sub, filter, shaper, gainMaster;
+  let ac = null, osc1, osc2, sub, lfo, lfoGain;
+  let noiseSrc, noiseFilter, noiseGain;
+  let shaper, filter, gainMaster;
   let started = false, muted = false, currentVol = 0;
 
-  function distortionCurve(amount){
-    const n = 256, curve = new Float32Array(n);
+  // normalized so the curve's peak stays near +-1 regardless of amount,
+  // giving saturation character without the harsh clipping that comes
+  // from an un-normalized tanh driven hard
+  function softCurve(amount){
+    const n = 512, curve = new Float32Array(n);
+    const peak = Math.tanh(amount);
     for(let i=0;i<n;i++){
       const x = i*2/n - 1;
-      curve[i] = Math.tanh(x*amount);
+      curve[i] = Math.tanh(x*amount) / peak;
     }
     return curve;
+  }
+
+  function makeNoiseBuffer(){
+    const len = ac.sampleRate * 2;
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for(let i=0;i<len;i++) data[i] = Math.random()*2-1;
+    return buf;
   }
 
   function init(){
@@ -425,36 +464,58 @@ const Engine = (function(){
     ac = new AC();
 
     osc1 = ac.createOscillator(); osc1.type = 'sawtooth';
-    osc2 = ac.createOscillator(); osc2.type = 'sawtooth'; osc2.detune.value = -9;
-    sub  = ac.createOscillator(); sub.type = 'square';
+    osc2 = ac.createOscillator(); osc2.type = 'sawtooth'; osc2.detune.value = -6;
+    sub  = ac.createOscillator(); sub.type = 'triangle';
+
+    lfo = ac.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 7;
+    lfoGain = ac.createGain(); lfoGain.gain.value = 1.2;
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc1.frequency);
+    lfoGain.connect(osc2.frequency);
 
     const mix = ac.createGain(); mix.gain.value = 1;
-    const subGain = ac.createGain(); subGain.gain.value = 0.35;
-    osc1.connect(mix); osc2.connect(mix);
+    const osc2Gain = ac.createGain(); osc2Gain.gain.value = 0.55;
+    const subGain = ac.createGain(); subGain.gain.value = 0.6;
+    osc1.connect(mix);
+    osc2.connect(osc2Gain); osc2Gain.connect(mix);
     sub.connect(subGain); subGain.connect(mix);
 
     shaper = ac.createWaveShaper();
-    shaper.curve = distortionCurve(1.6);
+    shaper.curve = softCurve(1.15);
     mix.connect(shaper);
 
     filter = ac.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = 500;
-    filter.Q.value = 0.7;
+    filter.frequency.value = 400;
+    filter.Q.value = 1.1;
     shaper.connect(filter);
 
     gainMaster = ac.createGain();
     gainMaster.gain.value = 0;
     filter.connect(gainMaster);
+
+    noiseSrc = ac.createBufferSource();
+    noiseSrc.buffer = makeNoiseBuffer();
+    noiseSrc.loop = true;
+    noiseFilter = ac.createBiquadFilter();
+    noiseFilter.type = 'bandpass';
+    noiseFilter.frequency.value = 900;
+    noiseFilter.Q.value = 0.6;
+    noiseGain = ac.createGain();
+    noiseGain.gain.value = 0;
+    noiseSrc.connect(noiseFilter);
+    noiseFilter.connect(noiseGain);
+    noiseGain.connect(gainMaster);
+
     gainMaster.connect(ac.destination);
 
-    osc1.start(); osc2.start(); sub.start();
+    osc1.start(); osc2.start(); sub.start(); lfo.start(); noiseSrc.start();
     if(ac.state === 'suspended') ac.resume();
   }
 
   function setMuted(m){
     muted = m;
-    if(gainMaster) gainMaster.gain.setTargetAtTime(m ? 0 : currentVol, ac.currentTime, 0.05);
+    if(gainMaster) gainMaster.gain.setTargetAtTime(m ? 0 : currentVol, ac.currentTime, 0.06);
   }
 
   function update(speed, maxSpeed, throttleOn, running){
@@ -471,18 +532,27 @@ const Engine = (function(){
     const GEARS = 4;
     const span = maxSpeed / GEARS;
     const gearPos = spd <= 1 ? 0 : (spd % span) / span;
-    const idleHz = 42, revHz = 145;
+    const idleHz = 36, revHz = 118;
     const baseHz = idleHz + gearPos * (revHz - idleHz);
 
-    osc1.frequency.setTargetAtTime(baseHz, now, 0.05);
-    osc2.frequency.setTargetAtTime(baseHz * 1.005, now, 0.05);
-    sub.frequency.setTargetAtTime(baseHz * 0.5, now, 0.05);
+    osc1.frequency.setTargetAtTime(baseHz, now, 0.07);
+    osc2.frequency.setTargetAtTime(baseHz * 1.004, now, 0.07);
+    sub.frequency.setTargetAtTime(baseHz * 0.5, now, 0.07);
+
+    // the idle lope smooths out once the engine is actually spinning
+    lfoGain.gain.setTargetAtTime(Math.max(0, 1.2*(1-gearPos*1.6)), now, 0.2);
 
     const throttleBoost = throttleOn ? 1 : 0;
-    filter.frequency.setTargetAtTime(500 + gearPos*1400 + throttleBoost*500, now, 0.08);
+    // cutoff tracks the fundamental so the harmonic balance stays
+    // consistent at any RPM instead of sounding buzzy at some and muffled
+    // at others
+    filter.frequency.setTargetAtTime(baseHz*5 + 260 + throttleBoost*380, now, 0.1);
 
-    currentVol = 0.05 + Math.min(spd/maxSpeed, 1)*0.09 + throttleBoost*0.05;
-    gainMaster.gain.setTargetAtTime(muted ? 0 : currentVol, now, 0.08);
+    noiseFilter.frequency.setTargetAtTime(500 + spd*3.2, now, 0.15);
+    noiseGain.gain.setTargetAtTime(Math.min(spd/maxSpeed,1)*0.035, now, 0.15);
+
+    currentVol = 0.035 + Math.min(spd/maxSpeed, 1)*0.07 + throttleBoost*0.035;
+    gainMaster.gain.setTargetAtTime(muted ? 0 : currentVol, now, 0.1);
   }
 
   return { init, update, setMuted, get isMuted(){ return muted; } };
@@ -571,13 +641,15 @@ function updatePlayer(dt){
     }
   }
 
-  fuel -= dt * (1.1 + Math.abs(player.speed)/260*3.2);
-  fuel = clamp(fuel, 0, 100);
+  if(FUEL_ENABLED){
+    fuel -= dt * (1.1 + Math.abs(player.speed)/260*3.2);
+    fuel = clamp(fuel, 0, 100);
 
-  for(const pad of gasPads){
-    if(dist2(player.x,player.z,pad.x,pad.z) < pad.r*pad.r){
-      if(fuel < 99.5) showBanner('REFUELED', 0.8);
-      fuel = 100;
+    for(const pad of gasPads){
+      if(dist2(player.x,player.z,pad.x,pad.z) < pad.r*pad.r){
+        if(fuel < 99.5) showBanner('REFUELED', 0.8);
+        fuel = 100;
+      }
     }
   }
 
@@ -666,10 +738,10 @@ function update(dt){
   }
 
   timeLeft -= dt;
-  if(timeLeft <= 0 || fuel <= 0){
+  if(timeLeft <= 0 || (FUEL_ENABLED && fuel <= 0)){
     gameState = 'over';
     Engine.update(0, 1, false, false);
-    showEndPanel(fuel<=0 ? 'OUT OF FUEL' : "TIME'S UP");
+    showEndPanel(FUEL_ENABLED && fuel<=0 ? 'OUT OF FUEL' : "TIME'S UP");
   }
 
   bannerTimer -= dt;
@@ -773,24 +845,112 @@ function shadeColor(base, k){
   return `rgb(${r},${g},${b})`;
 }
 
-function buildingFaces(b, cam){
+// Builds the 4 corners of a vertical rectangle lying in a face's plane —
+// faceAxis 'x' means the face sits at x=constVal spanning z in [a0,a1];
+// 'z' means it sits at z=constVal spanning x in [a0,a1].
+function facePlanePts(faceAxis, constVal, a0, a1, y0, y1){
+  if(faceAxis==='x') return [[constVal,y0,a0],[constVal,y1,a0],[constVal,y1,a1],[constVal,y0,a1]];
+  return [[a0,y0,constVal],[a0,y1,constVal],[a1,y1,constVal],[a1,y0,constVal]];
+}
+
+// Randomized windows (lit/unlit, per the building's own precomputed grid)
+// plus a ground-floor door, laid directly onto one wall face.
+function buildingWindows(b, faceAxis, constVal, lo, hi){
+  const quads = [];
+  const span = hi - lo;
+  const inset = 16;
+  const usable = span - inset*2;
+  const cols = b.cols;
+  if(usable > 0 && cols > 0){
+    const ww = Math.min(11, usable/cols*0.52);
+    const gap = cols > 1 ? (usable - ww*cols)/(cols-1) : 0;
+    const groundH = 22, floorH = 26, winH = 15, winTop = 5;
+    for(let r=0;r<b.rows;r++){
+      const y0 = groundH + r*floorH + winTop;
+      const y1 = y0 + winH;
+      if(y1 > b.h - 5) break;
+      const row = b.windows[r];
+      for(let c=0;c<cols;c++){
+        const pos = lo + inset + c*(ww+gap);
+        const lit = row && row[c];
+        const color = lit ? 'rgba(232,202,120,0.92)' : 'rgba(52,58,64,0.9)';
+        quads.push({pts: facePlanePts(faceAxis, constVal, pos, pos+ww, y0, y1), color});
+      }
+    }
+  }
+  const doorW = 12, doorH = 21;
+  const doorPos = lo + span/2 - doorW/2;
+  quads.push({pts: facePlanePts(faceAxis, constVal, doorPos, doorPos+doorW, 0, doorH), color:'rgba(38,34,32,0.95)'});
+  return quads;
+}
+
+function buildingFaces(b, cam, near){
   const faces = [];
   const grey = [190,192,196];
   // side facing camera on x axis
   if(cam.x < b.x1){
-    faces.push({pts:[[b.x1,0,b.z1],[b.x1,b.h,b.z1],[b.x1,b.h,b.z2],[b.x1,0,b.z2]], k:b.shade*0.85});
+    faces.push({pts:[[b.x1,0,b.z1],[b.x1,b.h,b.z1],[b.x1,b.h,b.z2],[b.x1,0,b.z2]], color: shadeColor(grey, b.shade*0.85)});
+    if(near) faces.push(...buildingWindows(b, 'x', b.x1, b.z1, b.z2));
   } else if(cam.x > b.x2){
-    faces.push({pts:[[b.x2,0,b.z2],[b.x2,b.h,b.z2],[b.x2,b.h,b.z1],[b.x2,0,b.z1]], k:b.shade*0.85});
+    faces.push({pts:[[b.x2,0,b.z2],[b.x2,b.h,b.z2],[b.x2,b.h,b.z1],[b.x2,0,b.z1]], color: shadeColor(grey, b.shade*0.85)});
+    if(near) faces.push(...buildingWindows(b, 'x', b.x2, b.z1, b.z2));
   }
   if(cam.z < b.z1){
-    faces.push({pts:[[b.x2,0,b.z1],[b.x2,b.h,b.z1],[b.x1,b.h,b.z1],[b.x1,0,b.z1]], k:b.shade*1.05});
+    faces.push({pts:[[b.x2,0,b.z1],[b.x2,b.h,b.z1],[b.x1,b.h,b.z1],[b.x1,0,b.z1]], color: shadeColor(grey, b.shade*1.05)});
+    if(near) faces.push(...buildingWindows(b, 'z', b.z1, b.x1, b.x2));
   } else if(cam.z > b.z2){
-    faces.push({pts:[[b.x1,0,b.z2],[b.x1,b.h,b.z2],[b.x2,b.h,b.z2],[b.x2,0,b.z2]], k:b.shade*1.05});
+    faces.push({pts:[[b.x1,0,b.z2],[b.x1,b.h,b.z2],[b.x2,b.h,b.z2],[b.x2,0,b.z2]], color: shadeColor(grey, b.shade*1.05)});
+    if(near) faces.push(...buildingWindows(b, 'z', b.z2, b.x1, b.x2));
   }
   if(cam.y < b.h){
-    faces.push({pts:[[b.x1,b.h,b.z1],[b.x2,b.h,b.z1],[b.x2,b.h,b.z2],[b.x1,b.h,b.z2]], k:b.shade*1.15});
+    faces.push({pts:[[b.x1,b.h,b.z1],[b.x2,b.h,b.z1],[b.x2,b.h,b.z2],[b.x1,b.h,b.z2]], color: shadeColor(grey, b.shade*1.15)});
   }
-  return faces.map(f=>({pts:f.pts, color: shadeColor(grey, f.k)}));
+  return faces;
+}
+
+// A petrol station: a canopy on four poles over a couple of pumps —
+// precomputed once per station since the geometry never moves.
+function buildStationQuads(pad){
+  const px = pad.x, pz = pad.z;
+  const quads = [];
+  const poleH = 36, roofH0 = 36, roofH1 = 40;
+  const roofHalfX = 30, roofHalfZ = 18, poleOffX = 24, poleOffZ = 12, poleHalf = 1.6;
+  const poleColor = 'rgb(130,132,136)';
+  const poleLit = shadeColor([130,132,136], 1.15);
+  const canopyTop = 'rgb(224,208,150)';
+  const canopyUnder = 'rgb(198,194,188)';
+  const canopyEdge = 'rgb(198,118,40)';
+  const pumpColor = 'rgb(172,174,178)';
+  const pumpLit = shadeColor([172,174,178], 1.15);
+  const pumpAccent = 'rgb(206,68,58)';
+
+  for(const [ox,oz] of [[-poleOffX,-poleOffZ],[poleOffX,-poleOffZ],[poleOffX,poleOffZ],[-poleOffX,poleOffZ]]){
+    const x0=px+ox-poleHalf, x1=px+ox+poleHalf, z0=pz+oz-poleHalf, z1=pz+oz+poleHalf;
+    quads.push({pts:[[x0,0,z0],[x0,poleH,z0],[x1,poleH,z0],[x1,0,z0]], color:poleColor});
+    quads.push({pts:[[x1,0,z1],[x1,poleH,z1],[x0,poleH,z1],[x0,0,z1]], color:poleColor});
+    quads.push({pts:[[x0,0,z1],[x0,poleH,z1],[x0,poleH,z0],[x0,0,z0]], color:poleLit});
+    quads.push({pts:[[x1,0,z0],[x1,poleH,z0],[x1,poleH,z1],[x1,0,z1]], color:poleLit});
+  }
+
+  const rx0=px-roofHalfX, rx1=px+roofHalfX, rz0=pz-roofHalfZ, rz1=pz+roofHalfZ;
+  quads.push({pts:[[rx0,roofH0,rz0],[rx1,roofH0,rz0],[rx1,roofH0,rz1],[rx0,roofH0,rz1]], color:canopyUnder});
+  quads.push({pts:[[rx0,roofH1,rz1],[rx1,roofH1,rz1],[rx1,roofH1,rz0],[rx0,roofH1,rz0]], color:canopyTop});
+  quads.push({pts:[[rx0,roofH0,rz0],[rx0,roofH1,rz0],[rx1,roofH1,rz0],[rx1,roofH0,rz0]], color:canopyEdge});
+  quads.push({pts:[[rx1,roofH0,rz1],[rx1,roofH1,rz1],[rx0,roofH1,rz1],[rx0,roofH0,rz1]], color:canopyEdge});
+  quads.push({pts:[[rx0,roofH0,rz1],[rx0,roofH1,rz1],[rx0,roofH1,rz0],[rx0,roofH0,rz0]], color:canopyEdge});
+  quads.push({pts:[[rx1,roofH0,rz0],[rx1,roofH1,rz0],[rx1,roofH1,rz1],[rx1,roofH0,rz1]], color:canopyEdge});
+
+  for(const [ox,oz] of [[-10,0],[10,0]]){
+    const hw=2.2, h1=11;
+    const x0=px+ox-hw, x1=px+ox+hw, z0=pz+oz-hw, z1=pz+oz+hw;
+    quads.push({pts:[[x0,0,z0],[x0,h1,z0],[x1,h1,z0],[x1,0,z0]], color:pumpColor});
+    quads.push({pts:[[x1,0,z1],[x1,h1,z1],[x0,h1,z1],[x0,0,z1]], color:pumpColor});
+    quads.push({pts:[[x0,0,z1],[x0,h1,z1],[x0,h1,z0],[x0,0,z0]], color:pumpLit});
+    quads.push({pts:[[x1,0,z0],[x1,h1,z0],[x1,h1,z1],[x1,0,z1]], color:pumpLit});
+    quads.push({pts:[[x0,8,z0],[x0,10,z0],[x1,10,z0],[x1,8,z0]], color:pumpAccent});
+  }
+
+  return quads;
 }
 
 function carColorRGB(hex){
@@ -1002,12 +1162,13 @@ function drawScene(){
     pitch: -0.09
   };
 
-  // gas pads as flat ground markers
+  // petrol station forecourts as flat ground markers (the canopy/pumps
+  // above them are depth-sorted below, alongside buildings and cars)
   for(const pad of gasPads){
     if(dist2(cam.x,cam.z,pad.x,pad.z) > RENDER_DIST*RENDER_DIST) continue;
-    const pts = [[pad.x-40,0.2,pad.z-40],[pad.x+40,0.2,pad.z-40],[pad.x+40,0.2,pad.z+40],[pad.x-40,0.2,pad.z+40]];
+    const pts = [[pad.x-36,0.2,pad.z-22],[pad.x+36,0.2,pad.z-22],[pad.x+36,0.2,pad.z+22],[pad.x-36,0.2,pad.z+22]];
     const proj = projectFace(pts, cam);
-    if(proj) polyFill(proj, 'rgba(210,205,180,0.55)', null);
+    if(proj) polyFill(proj, 'rgba(195,190,180,0.7)', null);
   }
 
   // dashed road markings down the center of every street
@@ -1022,11 +1183,17 @@ function drawScene(){
 
   // collect drawables
   const drawables = [];
+  const nearDistSq = (RENDER_DIST*0.45)*(RENDER_DIST*0.45);
   for(const b of buildings){
     const bx = (b.x1+b.x2)/2, bz=(b.z1+b.z2)/2;
     const d = dist2(cam.x,cam.z,bx,bz);
     if(d > RENDER_DIST*RENDER_DIST) continue;
-    drawables.push({depth:d, faces: buildingFaces(b, cam)});
+    drawables.push({depth:d, faces: buildingFaces(b, cam, d < nearDistSq)});
+  }
+  for(const pad of gasPads){
+    const d = dist2(cam.x,cam.z,pad.x,pad.z);
+    if(d > RENDER_DIST*RENDER_DIST) continue;
+    drawables.push({depth:d, faces: pad.quads});
   }
   for(const car of allCars()){
     const d = dist2(cam.x,cam.z,car.x,car.z);
@@ -1056,7 +1223,7 @@ function drawMinimap(){
   }
   mctx.fillStyle = 'rgba(220,210,170,0.7)';
   for(const pad of gasPads){
-    mctx.fillRect(ox+(pad.x-30)*scale, oz+(pad.z-30)*scale, 60*scale, 60*scale);
+    mctx.fillRect(ox+(pad.x-36)*scale, oz+(pad.z-22)*scale, 72*scale, 44*scale);
   }
   function dot(car, color, r){
     mctx.fillStyle = color;
@@ -1076,9 +1243,11 @@ function updateHUD(){
   document.getElementById('hudTime').textContent = String(Math.max(0,Math.ceil(timeLeft)));
   document.getElementById('hudScore').textContent = score;
   document.getElementById('hudCaught').textContent = caught;
-  const bar = document.getElementById('fuelbar');
-  bar.querySelector('i').style.width = clamp(fuel,0,100)+'%';
-  bar.classList.toggle('low', fuel < 25);
+  if(FUEL_ENABLED){
+    const bar = document.getElementById('fuelbar');
+    bar.querySelector('i').style.width = clamp(fuel,0,100)+'%';
+    bar.classList.toggle('low', fuel < 25);
+  }
   const bm = document.getElementById('bannerMsg');
   bm.style.opacity = bannerTimer > 0 ? '1' : '0';
 }
