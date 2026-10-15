@@ -546,6 +546,8 @@ const CIVILIAN_COLORS = ['#b9bdb2', '#8a9bb0', '#a98f6e', '#8f8f94', '#9bb08a', 
 let score, caught, timeLeft, fuel, gameState, roundLevel;
 let lastSuspectSpawnGuardTimer = 0;
 let bannerTimer = 0;
+const SHAKE_DURATION = 0.3;
+let shakeTimer = 0; // camera shake on impact — not a physics engine, but it reads as one
 
 function spawnPlayerStart(){
   // spawn at a street intersection, which is always clear of buildings
@@ -627,7 +629,18 @@ function spawnStreetCar(color, speed, type){
   c.dir = Math.random()<0.5 ? 1 : -1;
   c.heading = cardinalHeading(c.axis, c.dir);
   c.targetHeading = c.heading;
+  snapToLane(c, p.x, p.z);
   return c;
+}
+
+// AI traffic used to drive dead-center down every street with no lane
+// offset at all — two cars passing each other looked like oncoming
+// traffic on the wrong side, because there was no side. This snaps a car
+// onto its correct-hand lane at the given intersection point, called at
+// spawn and again every time it turns or reverses.
+function snapToLane(car, lineX, lineZ){
+  const off = correctLane(car.axis, car.dir) * LANE_OFFSET;
+  if(car.axis==='z') car.x = lineX + off; else car.z = lineZ + off;
 }
 
 function spawnSuspect(){
@@ -1267,6 +1280,7 @@ function updatePlayer(dt){
       showBanner('CRASH!', 0.6);
       player.crashCooldown = 0.8;
       SFX.crash();
+      shakeTimer = SHAKE_DURATION;
     }
   }
 
@@ -1294,9 +1308,10 @@ function collideBuildings(x, z, r){
   return null;
 }
 
-// buildings, plus the two experimental obstacle types that only the
-// player collides with — AI traffic drives straight through both (see
-// the comments where roundabouts/roadworks are generated)
+// buildings, the two experimental obstacle types that only the player
+// collides with (AI traffic drives straight through both — see the
+// comments where roundabouts/roadworks are generated), and now other
+// vehicles too — the player used to drive straight through traffic
 function collideWorld(x, z, r){
   if(collideBuildings(x,z,r)) return true;
   if(ROUNDABOUTS_ENABLED){
@@ -1308,6 +1323,11 @@ function collideWorld(x, z, r){
     const cx = clamp(x, rw.x1, rw.x2), cz = clamp(z, rw.z1, rw.z2);
     if(dist2(x,z,cx,cz) < r*r) return true;
   }
+  const vehicleR = r+8;
+  for(const c of allTraffic()){
+    if(dist2(x,z,c.x,c.z) < vehicleR*vehicleR) return true;
+  }
+  if(suspect && dist2(x,z,suspect.x,suspect.z) < vehicleR*vehicleR) return true;
   return false;
 }
 
@@ -1348,6 +1368,7 @@ function updateStreetCar(car, dt){
           car.axis = next.axis;
           car.dir = next.dir;
           car.targetHeading = cardinalHeading(next.axis, next.dir);
+          snapToLane(car, line, line);
           setSignal(car, goRight ? 'right' : 'left', 1.0);
         }
       } else if(Math.random() >= 0.55){
@@ -1356,6 +1377,7 @@ function updateStreetCar(car, dt){
         car.axis = next.axis;
         car.dir = next.dir;
         car.targetHeading = cardinalHeading(next.axis, next.dir);
+        snapToLane(car, line, line);
         setSignal(car, goRight ? 'right' : 'left', 1.0);
       }
       break;
@@ -1374,6 +1396,9 @@ function updateStreetCar(car, dt){
     car.axis = reversed.axis;
     car.dir = reversed.dir;
     car.targetHeading = cardinalHeading(reversed.axis, reversed.dir);
+    const crossVal = car.axis==='z' ? car.x : car.z;
+    const crossLine = nearestStreet(car.axis==='z' ? streetLinesX : streetLinesZ, crossVal);
+    snapToLane(car, crossLine, crossLine);
     car.turnCooldown = 1.0;
   }
 }
@@ -1555,6 +1580,7 @@ function update(dt){
   if(gameState !== 'playing') return;
 
   worldTime += dt;
+  if(shakeTimer > 0) shakeTimer -= dt;
   updateBlink(dt);
   updateWindowFlicker(dt);
   updatePlayer(dt);
@@ -2906,10 +2932,11 @@ function drawScene(){
   ctx.fillStyle = g2;
   ctx.fillRect(0,HORIZON_Y,W,H-HORIZON_Y);
 
+  const shakeMag = shakeTimer > 0 ? 7 * (shakeTimer/SHAKE_DURATION) : 0;
   const cam = {
-    x: player.x - Math.sin(player.heading)*CAM_BACK,
-    z: player.z - Math.cos(player.heading)*CAM_BACK,
-    y: CAM_HEIGHT,
+    x: player.x - Math.sin(player.heading)*CAM_BACK + (Math.random()*2-1)*shakeMag,
+    z: player.z - Math.cos(player.heading)*CAM_BACK + (Math.random()*2-1)*shakeMag,
+    y: CAM_HEIGHT + (Math.random()*2-1)*shakeMag*0.5,
     heading: player.heading,
     pitch: -0.09
   };
