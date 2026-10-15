@@ -133,19 +133,19 @@
         <h1>TURBO CIRCUIT</h1>
         <h2>a tribute to Turbo Esprit (ZX Spectrum, 1986)</h2>
         <p>
-          Tail the amber <b>suspect car</b> through the grey city grid.
+          Tail the amber <b>suspect car</b> through the walled city.
           Get close before they clock you and they'll bolt — once
-          spotted they're faster, so close in quietly. Get close at
-          speed to make the bust before time runs out. Clip a building
-          and you'll stall; clip traffic — a <b style="color:#6fa8ff">police
-          car</b>, an <b style="color:#f0f0e6">ambulance</b>, a van, a bike
-          or an ebike — and you'll lose a little time.
+          spotted they're faster, so close in quietly. Ram them at speed
+          or shoot them to make the bust before time runs out. Clip a
+          building and you'll stall; clip traffic and you'll lose a
+          little time — more for a <b style="color:#6fa8ff">police car</b>.
         </p>
         <p>
           <span class="keys">&uarr; / W</span> accelerate&nbsp;&nbsp;
           <span class="keys">&darr; / S</span> brake / reverse<br>
-          <span class="keys">&larr; &rarr; / A D</span> change lane —
-          tap it near a junction to turn instead<br>
+          <span class="keys">&larr; &rarr; / A D</span> change lane&nbsp;&nbsp;
+          <span class="keys">Q / E</span> turn left / right at the next corner<br>
+          <span class="keys">SPACE</span> fire&nbsp;&nbsp;
           <span class="keys">M</span> mute&nbsp;&nbsp;
           <span class="keys">R</span> restart
         </p>
@@ -188,17 +188,18 @@ const JUNCTION_WINDOW = 70;        // how close to a crossing a turn can be star
                                     // wide on purpose, turning was too easy to miss
 const FUEL_ENABLED = false;        // fuel management is parked for now
 
-// muted material tints a building can be built from — still a grey city,
-// but concrete, sandstone, slate and brick-grey read as different buildings
-// instead of one monotone repeated everywhere
+// light, near-white material tints — closer to the flat-shaded white
+// polygons of the original Spectrum game than a mid grey, but each
+// building still picks its own so they don't all read as one slab
 const BUILDING_TINTS = [
-  [190,192,196], // concrete
-  [198,188,170], // sandstone
-  [172,182,196], // cool blue-grey
-  [188,184,172], // beige
-  [168,172,176], // slate
-  [196,176,168], // brick-grey
+  [226,226,226], // white concrete
+  [230,225,214], // warm white / sandstone
+  [214,221,228], // cool white / blue-grey
+  [224,220,209], // beige-white
+  [210,213,216], // light slate
+  [228,214,207], // pale brick
 ];
+const WALL_HEIGHT = 42, WALL_THICK = 9;
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -215,8 +216,10 @@ const worldHalfZ = (BLOCKS_Z * BLOCK) / 2;
 let buildings = [];   // {x1,x2,z1,z2,h,shade}
 let gasPads = [];     // {x,z,r}
 let roadMarks = [];   // {x1,x2,z1,z2} dashed centerline segments
+let walls = [];        // perimeter wall segments, same shape as a building box
 let streetLinesX = [];
 let streetLinesZ = [];
+let worldTime = 0;     // elapsed play time, drives party-building light cycles
 
 function cellCenter(i, n){ return (i - n/2 + 0.5) * BLOCK; }
 
@@ -242,8 +245,9 @@ function generateCity(seed){
       if(roll < 0.4) h = 34 + rnd()*44;
       else if(roll < 0.78) h = 78 + rnd()*95;
       else h = 175 + rnd()*165;
-      const shade = 0.55 + rnd()*0.3;
+      const shade = 0.75 + rnd()*0.25;
       const tint = BUILDING_TINTS[Math.floor(rnd()*BUILDING_TINTS.length)];
+      const party = rnd() < 0.06; // one in ~16: a club with its own light show
 
       const cols = 3 + Math.floor(rnd()*2);
       const rows = Math.max(1, Math.floor((h-24)/26));
@@ -258,7 +262,7 @@ function generateCity(seed){
       buildings.push({
         x1:cx-BUILD_HALF, x2:cx+BUILD_HALF,
         z1:cz-BUILD_HALF, z2:cz+BUILD_HALF,
-        h, shade, tint, cols, rows, windows
+        h, shade, tint, cols, rows, windows, party
       });
     }
   }
@@ -278,6 +282,26 @@ function generateCity(seed){
     for(let x=-worldHalfX+dashGap; x<worldHalfX; x+=dashLen+dashGap){
       roadMarks.push({x1:x, x2:x+dashLen, z1:z-dashHalfWid, z2:z+dashHalfWid});
     }
+  }
+
+  // a perimeter wall around the whole city, like the original's — the
+  // player was already clamped to stay inside this boundary, now it's
+  // visible instead of an invisible wall. One segment per block for a
+  // bit of pillar-like rhythm along each side.
+  walls = [];
+  for(let i=0;i<BLOCKS_Z;i++){
+    const cz = cellCenter(i, BLOCKS_Z);
+    const z1 = cz-BLOCK/2, z2 = cz+BLOCK/2;
+    const shadeVar = (i%2===0) ? 1.0 : 0.9;
+    walls.push({x1:-worldHalfX-WALL_THICK, x2:-worldHalfX, z1, z2, h:WALL_HEIGHT, shadeVar});
+    walls.push({x1:worldHalfX, x2:worldHalfX+WALL_THICK, z1, z2, h:WALL_HEIGHT, shadeVar});
+  }
+  for(let i=0;i<BLOCKS_X;i++){
+    const cx = cellCenter(i, BLOCKS_X);
+    const x1 = cx-BLOCK/2, x2 = cx+BLOCK/2;
+    const shadeVar = (i%2===0) ? 1.0 : 0.9;
+    walls.push({x1, x2, z1:-worldHalfZ-WALL_THICK, z2:-worldHalfZ, h:WALL_HEIGHT, shadeVar});
+    walls.push({x1, x2, z1:worldHalfZ, z2:worldHalfZ+WALL_THICK, h:WALL_HEIGHT, shadeVar});
   }
 }
 
@@ -343,6 +367,7 @@ function updateBlink(dt){
 }
 
 let player, suspect, police, ambulances, motorbikes, vans, ebikes, civilians, particles;
+let bullets = [];
 const CIVILIAN_COLORS = ['#b9bdb2', '#8a9bb0', '#a98f6e', '#8f8f94', '#9bb08a', '#b08a8a'];
 let score, caught, timeLeft, fuel, gameState, roundLevel;
 let lastSuspectSpawnGuardTimer = 0;
@@ -356,6 +381,8 @@ function spawnPlayerStart(){
   car.type = 'sports';
   car.crashCooldown = 0;
   car.hazardCooldown = 0;
+  car.gunCooldown = 0;
+  car.pendingTurn = null;
   car.streetCoord = x;
   car.lane = 1;
   return car;
@@ -367,6 +394,8 @@ function resetGame(){
   player = spawnPlayerStart();
   score = 0; caught = 0; timeLeft = START_TIME; fuel = START_FUEL;
   roundLevel = 0;
+  worldTime = 0;
+  bullets = [];
   suspect = null;
   police = [];
   for(let i=0;i<3;i++){
@@ -439,8 +468,11 @@ window.addEventListener('keydown', e=>{
   if(e.key==='Enter' && gameState==='start') startGame();
   if((e.key==='r'||e.key==='R') && (gameState==='over'||gameState==='playing')) resetGame();
   if(e.key==='m'||e.key==='M') toggleMute();
-  if((k==='arrowleft'||k==='a') && !e.repeat) handleSteer('left');
-  if((k==='arrowright'||k==='d') && !e.repeat) handleSteer('right');
+  if((k==='arrowleft'||k==='a') && !e.repeat) changeLane('left');
+  if((k==='arrowright'||k==='d') && !e.repeat) changeLane('right');
+  if((k==='q') && !e.repeat) queueTurn('left');
+  if((k==='e') && !e.repeat) queueTurn('right');
+  if(k===' ' && !e.repeat) fireGun();
   if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k)) e.preventDefault();
 });
 window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
@@ -655,7 +687,35 @@ const SFX = (function(){
     });
   }
 
-  return { crash, bust };
+  function gunshot(){
+    const ac = ctx();
+    if(!ac || Engine.isMuted) return;
+    const now = ac.currentTime;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.28, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now+0.11);
+    g.connect(ac.destination);
+
+    const len = Math.floor(ac.sampleRate*0.12);
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for(let i=0;i<len;i++) data[i] = (Math.random()*2-1) * (1 - i/len);
+    const noise = ac.createBufferSource(); noise.buffer = buf;
+    const nf = ac.createBiquadFilter(); nf.type = 'highpass'; nf.frequency.value = 700;
+    noise.connect(nf); nf.connect(g);
+    noise.start(now);
+
+    const crack = ac.createOscillator(); crack.type = 'square';
+    crack.frequency.setValueAtTime(900, now);
+    crack.frequency.exponentialRampToValueAtTime(180, now+0.05);
+    const cg = ac.createGain();
+    cg.gain.setValueAtTime(0.18, now);
+    cg.gain.exponentialRampToValueAtTime(0.001, now+0.06);
+    crack.connect(cg); cg.connect(ac.destination);
+    crack.start(now); crack.stop(now+0.07);
+  }
+
+  return { crash, bust, gunshot };
 })();
 
 function toggleMute(){
@@ -668,19 +728,27 @@ document.getElementById('hudSound').addEventListener('click', toggleMute);
 // Physics / AI update
 // ---------------------------------------------------------------
 
-// Turbo Esprit didn't let you freely swing the wheel mid-block — left/right
-// shifted you a lane over, and you only actually turned a corner near a
-// junction. Steering here is edge-triggered (one action per key press) so
-// it reads the same way: a tap away from a junction queues a lane change,
-// a tap near one commits to the turn.
-function handleSteer(side){
+// Left/right (arrows or A/D) only ever shifts you a lane over, same as
+// real lane-change — it never turns you. Turning is its own dedicated
+// action (Q/E): it doesn't require precise timing near a junction, it
+// just arms a turn that fires the instant the car reaches the next one,
+// so there's no way to mistime it into a crash.
+function changeLane(side){
   if(gameState!=='playing' || !player) return;
-  const forward = player.axis==='z' ? player.z : player.x;
-  const lines = player.axis==='z' ? streetLinesZ : streetLinesX;
-  const nearJunction = lines.some(line => Math.abs(forward-line) < JUNCTION_WINDOW);
-  if(nearJunction) turnPlayer(side);
-  else player.lane = side==='left' ? -1 : 1;
-  setSignal(player, side, 1.0);
+  player.lane = side==='left' ? -1 : 1;
+  setSignal(player, side, 0.8);
+}
+
+function queueTurn(side){
+  if(gameState!=='playing' || !player) return;
+  player.pendingTurn = side;
+  setSignal(player, side, 2.5);
+}
+
+// the lane that puts you on the correct (non-oncoming) side of the
+// street once you're pointed this way — right-hand traffic convention
+function correctLane(axis, dir){
+  return dir * (axis==='z' ? 1 : -1);
 }
 
 function turnPlayer(side){
@@ -692,6 +760,20 @@ function turnPlayer(side){
   player.axis = next.axis;
   player.dir = next.dir;
   player.targetHeading = cardinalHeading(next.axis, next.dir);
+  player.lane = correctLane(next.axis, next.dir);
+}
+
+// checked every frame while a turn is armed: fires the turn the moment
+// the player is within range of any junction, regardless of how early
+// or imprecisely Q/E was pressed
+function updatePendingTurn(){
+  if(!player.pendingTurn) return;
+  const forward = player.axis==='z' ? player.z : player.x;
+  const lines = player.axis==='z' ? streetLinesZ : streetLinesX;
+  if(lines.some(line => Math.abs(forward-line) < JUNCTION_WINDOW)){
+    turnPlayer(player.pendingTurn);
+    player.pendingTurn = null;
+  }
 }
 
 function updatePlayer(dt){
@@ -705,7 +787,9 @@ function updatePlayer(dt){
   player.speed = clamp(player.speed, -90, player.maxSpeed);
   if(Math.abs(player.speed) < 2 && !accel && !brake) player.speed = 0;
 
+  updatePendingTurn();
   approachHeading(player, dt, TURN_RATE);
+  player.gunCooldown -= dt;
 
   // slide toward the target lane at a fixed rate, then drive straight
   // down the current street at that lane offset
@@ -829,24 +913,62 @@ function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 function allTraffic(){ return [...police, ...ambulances, ...motorbikes, ...vans, ...ebikes, ...civilians]; }
 function allCars(){ return [player, suspect, ...allTraffic()]; }
 
-// getting too close to any moving traffic costs time and speed — a bigger
-// hit for an ambulance you shouldn't be cutting off, a smaller one for a
-// bike or ebike that was probably weaving around you anyway. Kept gentle
-// (and debounced via player.hazardCooldown below) for easy playtesting.
-const HAZARDS = [
-  {list: () => police,      label: 'POLICE',    penalty: 3},
-  {list: () => ambulances,  label: 'AMBULANCE', penalty: 4},
-  {list: () => motorbikes,  label: 'BIKE',      penalty: 2},
-  {list: () => vans,        label: 'VAN',       penalty: 2},
-  {list: () => ebikes,      label: 'EBIKE',     penalty: 1},
-  {list: () => civilians,   label: 'TRAFFIC',   penalty: 1},
-];
+// Getting too close to any moving traffic costs time and speed — just
+// two tiers (used to be six, one per vehicle type, which was needless
+// complexity): police cost more since running into the law should sting,
+// everything else costs the same flat, small amount. Debounced via
+// player.hazardCooldown so lingering near one doesn't restack the
+// penalty every frame.
+const HAZARD_PENALTY = 1;
+const HAZARD_PENALTY_POLICE = 3;
+
+function bustSuspect(){
+  score += 100 * roundLevel;
+  caught++;
+  timeLeft = Math.min(timeLeft + CATCH_BONUS_TIME, 999);
+  showBanner('BUSTED! +' + (100*roundLevel), 1.1);
+  SFX.bust();
+  spawnSuspect();
+}
+
+function fireGun(){
+  if(gameState!=='playing' || !player || player.gunCooldown > 0) return;
+  player.gunCooldown = 0.28;
+  bullets.push({
+    x: player.x + Math.sin(player.heading)*18,
+    z: player.z + Math.cos(player.heading)*18,
+    heading: player.heading,
+    speed: 480,
+    life: 1.4
+  });
+  SFX.gunshot();
+}
+
+function updateBullets(dt){
+  for(let i=bullets.length-1; i>=0; i--){
+    const b = bullets[i];
+    b.x += Math.sin(b.heading)*b.speed*dt;
+    b.z += Math.cos(b.heading)*b.speed*dt;
+    b.life -= dt;
+    let gone = b.life <= 0;
+    if(dist2(b.x,b.z,suspect.x,suspect.z) < 18*18){
+      bustSuspect();
+      gone = true;
+    } else if(collideBuildings(b.x, b.z, 2)){
+      gone = true;
+    }
+    if(gone) bullets.splice(i,1);
+  }
+}
 
 function update(dt){
   if(gameState !== 'playing') return;
 
+  worldTime += dt;
   updateBlink(dt);
+  updateWindowFlicker(dt);
   updatePlayer(dt);
+  updateBullets(dt);
   updateStreetCar(suspect, dt);
   for(const car of allTraffic()) updateStreetCar(car, dt);
 
@@ -862,17 +984,22 @@ function update(dt){
 
   player.hazardCooldown -= dt;
   if(player.hazardCooldown <= 0){
-    outer: for(const hz of HAZARDS){
-      for(const car of hz.list()){
-        if(dist2(player.x,player.z,car.x,car.z) < 26*26){
-          timeLeft -= hz.penalty;
-          player.speed *= 0.3;
-          showBanner(hz.label+'! -'+hz.penalty+'s', 0.9);
-          player.hazardCooldown = HAZARD_COOLDOWN;
-          SFX.crash();
-          break outer;
-        }
+    let hit = null;
+    for(const car of police){
+      if(dist2(player.x,player.z,car.x,car.z) < 26*26){ hit = {label:'POLICE', penalty:HAZARD_PENALTY_POLICE}; break; }
+    }
+    if(!hit){
+      for(const car of allTraffic()){
+        if(car.type==='police') continue;
+        if(dist2(player.x,player.z,car.x,car.z) < 26*26){ hit = {label:'TRAFFIC', penalty:HAZARD_PENALTY}; break; }
       }
+    }
+    if(hit){
+      timeLeft -= hit.penalty;
+      player.speed *= 0.3;
+      showBanner(hit.label+'! -'+hit.penalty+'s', 0.9);
+      player.hazardCooldown = HAZARD_COOLDOWN;
+      SFX.crash();
     }
   }
 
@@ -886,12 +1013,7 @@ function update(dt){
 
   if(dist2(player.x,player.z,suspect.x,suspect.z) < CATCH_RADIUS*CATCH_RADIUS
      && Math.abs(player.speed) > 40){
-    score += 100 * roundLevel;
-    caught++;
-    timeLeft = Math.min(timeLeft + CATCH_BONUS_TIME, 999);
-    showBanner('BUSTED! +' + (100*roundLevel), 1.1);
-    SFX.bust();
-    spawnSuspect();
+    bustSuspect();
   }
 
   timeLeft -= dt;
@@ -984,14 +1106,14 @@ function projectFace(pts, cam){
   return clipped.map(toScreen);
 }
 
-function polyFill(pts, color, stroke){
+function polyFill(pts, color, stroke, width){
   ctx.beginPath();
   ctx.moveTo(pts[0].x, pts[0].y);
   for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x, pts[i].y);
   ctx.closePath();
   ctx.fillStyle = color;
   ctx.fill();
-  if(stroke){ ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+  if(stroke){ ctx.strokeStyle = stroke; ctx.lineWidth = width || 1; ctx.stroke(); }
 }
 
 function shadeColor(base, k){
@@ -1010,8 +1132,15 @@ function facePlanePts(faceAxis, constVal, a0, a1, y0, y1){
   return [[a0,y0,constVal],[a0,y1,constVal],[a1,y1,constVal],[a1,y0,constVal]];
 }
 
-// Randomized windows (lit/unlit, per the building's own precomputed grid)
-// plus a ground-floor door, laid directly onto one wall face.
+// a chasing disco palette for "party" buildings — cycles per-window with
+// a phase offset across the grid so it reads as lights running across
+// the face rather than all flashing in sync
+const DISCO_COLORS = ['rgba(255,70,70,0.95)','rgba(70,130,255,0.95)','rgba(255,225,50,0.95)','rgba(70,225,130,0.95)','rgba(225,70,255,0.95)'];
+
+// Randomized windows (lit/unlit, per the building's own precomputed grid,
+// occasionally flipped by updateWindowFlicker for a lived-in feel) plus a
+// ground-floor door, laid directly onto one wall face. Party buildings
+// swap the lit/unlit scheme for a chasing disco cycle.
 function buildingWindows(b, faceAxis, constVal, lo, hi){
   const quads = [];
   const span = hi - lo;
@@ -1029,8 +1158,14 @@ function buildingWindows(b, faceAxis, constVal, lo, hi){
       const row = b.windows[r];
       for(let c=0;c<cols;c++){
         const pos = lo + inset + c*(ww+gap);
-        const lit = row && row[c];
-        const color = lit ? 'rgba(232,202,120,0.92)' : 'rgba(52,58,64,0.9)';
+        let color;
+        if(b.party){
+          const idx = Math.floor(worldTime*4 + r*1.3 + c*0.7);
+          color = DISCO_COLORS[((idx % DISCO_COLORS.length) + DISCO_COLORS.length) % DISCO_COLORS.length];
+        } else {
+          const lit = row && row[c];
+          color = lit ? 'rgba(232,202,120,0.92)' : 'rgba(52,58,64,0.9)';
+        }
         quads.push({pts: facePlanePts(faceAxis, constVal, pos, pos+ww, y0, y1), color});
       }
     }
@@ -1039,6 +1174,22 @@ function buildingWindows(b, faceAxis, constVal, lo, hi){
   const doorPos = lo + span/2 - doorW/2;
   quads.push({pts: facePlanePts(faceAxis, constVal, doorPos, doorPos+doorW, 0, doorH), color:'rgba(38,34,32,0.95)'});
   return quads;
+}
+
+// occasionally flips a handful of random windows lit/unlit across the
+// city, so lights visibly turn on and off over the course of a run
+let flickerClock = 0;
+function updateWindowFlicker(dt){
+  flickerClock -= dt;
+  if(flickerClock > 0) return;
+  flickerClock = 0.35 + Math.random()*0.35;
+  for(let n=0;n<3;n++){
+    const b = buildings[Math.floor(Math.random()*buildings.length)];
+    if(!b || b.party || !b.rows) continue;
+    const r = Math.floor(Math.random()*b.rows);
+    const c = Math.floor(Math.random()*b.cols);
+    if(b.windows[r]) b.windows[r][c] = !b.windows[r][c];
+  }
 }
 
 function buildingFaces(b, cam, near){
@@ -1061,6 +1212,29 @@ function buildingFaces(b, cam, near){
   }
   if(cam.y < b.h){
     faces.push({pts:[[b.x1,b.h,b.z1],[b.x2,b.h,b.z1],[b.x2,b.h,b.z2],[b.x1,b.h,b.z2]], color: shadeColor(tint, b.shade*1.15)});
+  }
+  return faces;
+}
+
+// A perimeter wall segment — same box shape as a building, one plain
+// tint with no windows, alternating a touch lighter/darker per segment
+// (set at generation time) for a bit of pillar-like rhythm.
+const WALL_TINT = [206,206,202];
+function wallFaces(w, cam){
+  const faces = [];
+  const sv = w.shadeVar;
+  if(cam.x < w.x1){
+    faces.push({pts:[[w.x1,0,w.z1],[w.x1,w.h,w.z1],[w.x1,w.h,w.z2],[w.x1,0,w.z2]], color: shadeColor(WALL_TINT, 0.85*sv)});
+  } else if(cam.x > w.x2){
+    faces.push({pts:[[w.x2,0,w.z2],[w.x2,w.h,w.z2],[w.x2,w.h,w.z1],[w.x2,0,w.z1]], color: shadeColor(WALL_TINT, 0.85*sv)});
+  }
+  if(cam.z < w.z1){
+    faces.push({pts:[[w.x2,0,w.z1],[w.x2,w.h,w.z1],[w.x1,w.h,w.z1],[w.x1,0,w.z1]], color: shadeColor(WALL_TINT, 1.0*sv)});
+  } else if(cam.z > w.z2){
+    faces.push({pts:[[w.x1,0,w.z2],[w.x1,w.h,w.z2],[w.x2,w.h,w.z2],[w.x2,0,w.z2]], color: shadeColor(WALL_TINT, 1.0*sv)});
+  }
+  if(cam.y < w.h){
+    faces.push({pts:[[w.x1,w.h,w.z1],[w.x2,w.h,w.z1],[w.x2,w.h,w.z2],[w.x1,w.h,w.z2]], color: shadeColor(WALL_TINT, 1.15*sv)});
   }
   return faces;
 }
@@ -1113,6 +1287,19 @@ function buildStationQuads(pad){
 function carColorRGB(hex){
   const n = parseInt(hex.slice(1),16);
   return [(n>>16)&255, (n>>8)&255, n&255];
+}
+
+// a short bright tracer, elongated along its direction of travel
+function buildBulletQuads(bu){
+  const s = Math.sin(bu.heading), c = Math.cos(bu.heading);
+  function tw(lx, ly, lz){ return [bu.x + (lx*c + lz*s), ly, bu.z + (-lx*s + lz*c)]; }
+  const w = 0.7, len = 5, y = 6.5;
+  const core = 'rgb(255,240,180)';
+  const glow = 'rgba(255,200,90,0.55)';
+  return [
+    {pts:[tw(-w,y,-len),tw(w,y,-len),tw(w,y,len),tw(-w,y,len)], color:core},
+    {pts:[tw(-w*2.4,y,-len*1.6),tw(w*2.4,y,-len*1.6),tw(w*2.4,y,len*0.4),tw(-w*2.4,y,len*0.4)], color:glow}
+  ];
 }
 
 function buildVehicleQuads(car){
@@ -1550,27 +1737,43 @@ function drawScene(){
   // fixes that.
   const allFaces = [];
   const nearDistSq = (RENDER_DIST*0.45)*(RENDER_DIST*0.45);
-  const buildingStroke = 'rgba(20,20,22,0.65)';
+  // bolder, fuller-opacity edges than before — closer to the flat-shaded,
+  // black-outlined polygons of the original Spectrum game
+  const buildingStroke = 'rgba(15,15,17,0.85)';
   const carStroke = 'rgba(0,0,0,0.55)';
+  const bulletStroke = null;
 
   for(const b of buildings){
     const bx = (b.x1+b.x2)/2, bz=(b.z1+b.z2)/2;
     const d = dist2(cam.x,cam.z,bx,bz);
     if(d > RENDER_DIST*RENDER_DIST) continue;
     for(const f of buildingFaces(b, cam, d < nearDistSq)){
-      allFaces.push({pts:f.pts, color:f.color, stroke:buildingStroke, depth:faceDepth(f.pts, cam)});
+      allFaces.push({pts:f.pts, color:f.color, stroke:buildingStroke, width:1.3, depth:faceDepth(f.pts, cam)});
+    }
+  }
+  for(const w of walls){
+    const wx = (w.x1+w.x2)/2, wz=(w.z1+w.z2)/2;
+    const d = dist2(cam.x,cam.z,wx,wz);
+    if(d > RENDER_DIST*RENDER_DIST) continue;
+    for(const f of wallFaces(w, cam)){
+      allFaces.push({pts:f.pts, color:f.color, stroke:buildingStroke, width:1.3, depth:faceDepth(f.pts, cam)});
     }
   }
   for(const pad of gasPads){
     const d = dist2(cam.x,cam.z,pad.x,pad.z);
     if(d > RENDER_DIST*RENDER_DIST) continue;
     for(const f of pad.quads){
-      allFaces.push({pts:f.pts, color:f.color, stroke:buildingStroke, depth:faceDepth(f.pts, cam)});
+      allFaces.push({pts:f.pts, color:f.color, stroke:buildingStroke, width:1.3, depth:faceDepth(f.pts, cam)});
     }
   }
   for(const car of allCars()){
     for(const f of buildVehicleQuads(car)){
-      allFaces.push({pts:f.pts, color:f.color, stroke:carStroke, depth:faceDepth(f.pts, cam)});
+      allFaces.push({pts:f.pts, color:f.color, stroke:carStroke, width:1, depth:faceDepth(f.pts, cam)});
+    }
+  }
+  for(const bu of bullets){
+    for(const f of buildBulletQuads(bu)){
+      allFaces.push({pts:f.pts, color:f.color, stroke:bulletStroke, width:1, depth:faceDepth(f.pts, cam)});
     }
   }
 
@@ -1578,7 +1781,7 @@ function drawScene(){
   for(const f of allFaces){
     const proj = projectFace(f.pts, cam);
     if(!proj) continue;
-    polyFill(proj, f.color, f.stroke);
+    polyFill(proj, f.color, f.stroke, f.width);
   }
 }
 
