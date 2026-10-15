@@ -203,6 +203,8 @@ const DRIVE_SIDE = 'right';        // 'right' (US-style, default) or 'left' (UK-
 const DAY_LENGTH = 150;            // seconds for a full day/night cycle — keeps advancing
                                     // across restarts, not tied to the per-round timer
 const SUSPECT_RADAR_RANGE = 700;   // minimap: beyond this the target's blip gets noisy/unreliable
+const HELI_RADIUS = 380, HELI_HEIGHT = 400, HELI_SPEED = 0.12; // police helicopter orbit
+const LC_CYCLE = 22, LC_LOWER = 1.5, LC_CLOSED = 6, LC_RAISE = 1.5; // level-crossing phase timing
 
 // light, near-white material tints — closer to the flat-shaded white
 // polygons of the original Spectrum game than a mid grey, but each
@@ -241,6 +243,7 @@ let signs = [];        // {x,z,type}
 let roadworks = [];    // {x1,x2,z1,z2,cones,signX,signZ} — collidable lane closures
 let sidewalkBeats = []; // {x,z,axis,hasDog} — where pedestrians/dogs walk the curb
 let sidewalks = [];    // {x1,x2,z1,z2} flat pavement strips along every curb
+let levelCrossing = {x:0, z:0}; // a single rail crossing on one street
 let streetLinesX = [];
 let streetLinesZ = [];
 let worldTime = 0;     // elapsed play time, drives party-building light cycles
@@ -448,6 +451,9 @@ function generateCity(seed){
       sidewalkBeats.push({x:cellCenter(ix,BLOCKS_X), z:streetLinesZ[iz]+side*(ROAD_HALF-5), axis:'x', hasDog:swRnd()<0.4});
     }
   }
+
+  // a single rail crossing on one street, out toward the edge of town
+  levelCrossing = {x: streetLinesX[4], z: streetLinesZ[8]};
 }
 
 function mulberry32(a){
@@ -1203,7 +1209,7 @@ function collideWorld(x, z, r){
 
 function updateStreetCar(car, dt){
   const exempt = car.fleeing || car.type==='ambulance' || car.type==='firetruck';
-  if(!exempt && redLightAhead(car)){ car.braking = true; return; }
+  if(!exempt && (redLightAhead(car) || levelCrossingBlocked(car))){ car.braking = true; return; }
   car.braking = !!car.donutBreak;
 
   // honked at: a brief startled burst of speed, like scattering out of
@@ -1310,6 +1316,25 @@ function redLightAhead(car){
     }
   }
   return false;
+}
+
+// open -> barrier lowers -> closed (train passes) -> barrier raises -> open
+function levelCrossingState(t){
+  const p = ((t % LC_CYCLE)+LC_CYCLE)%LC_CYCLE;
+  const openEnd = LC_CYCLE-LC_LOWER-LC_CLOSED-LC_RAISE;
+  if(p < openEnd) return {phase:'open', barrierT:0, trainT:0};
+  let q = p-openEnd;
+  if(q < LC_LOWER) return {phase:'lowering', barrierT:q/LC_LOWER, trainT:0};
+  q -= LC_LOWER;
+  if(q < LC_CLOSED) return {phase:'closed', barrierT:1, trainT:q/LC_CLOSED};
+  q -= LC_CLOSED;
+  return {phase:'raising', barrierT:1-q/LC_RAISE, trainT:1};
+}
+function levelCrossingBlocked(car){
+  if(car.axis !== 'z' || Math.abs(car.x-levelCrossing.x) > 8) return false;
+  if(levelCrossingState(worldTime).phase === 'open') return false;
+  const distToLine = car.dir>0 ? (levelCrossing.z-car.z) : (car.z-levelCrossing.z);
+  return distToLine > 0 && distToLine < TL_STOP_WINDOW;
 }
 
 const CLUB_AUDIO_RADIUS = 230;
@@ -2595,6 +2620,86 @@ function buildDogQuads(d){
   return quads;
 }
 
+// --- level crossing: rails (flat decal), barrier posts+arms, and a
+// train that only appears while the crossing is closed ---------------
+function buildBarrierQuads(px, pz, barrierT, side){
+  const quads = [];
+  const postH = 10;
+  quads.push({pts:[[px-1,0,pz],[px-1,postH,pz],[px+1,postH,pz],[px+1,0,pz]], color:'rgb(70,72,76)'});
+  quads.push({pts:[[px,0,pz-1],[px,postH,pz-1],[px,postH,pz+1],[px,0,pz+1]], color:'rgb(70,72,76)'});
+  const angle = (1-barrierT)*Math.PI/2; // 0 = horizontal/down (blocking), PI/2 = vertical/up (clear)
+  const armLen = 20;
+  const dx = Math.cos(angle)*armLen*side, dy = Math.sin(angle)*armLen;
+  const segs = 3;
+  for(let i=0;i<segs;i++){
+    const t0=i/segs, t1=(i+1)/segs;
+    const x0=px+dx*t0, y0=postH+dy*t0, x1=px+dx*t1, y1=postH+dy*t1;
+    const col = i%2===0 ? 'rgb(225,40,35)' : 'rgb(235,235,228)';
+    quads.push({pts:[[x0,y0-0.8,pz],[x1,y1-0.8,pz],[x1,y1+0.8,pz],[x0,y0+0.8,pz]], color:col});
+  }
+  return quads;
+}
+function buildLevelCrossingBarriers(barrierT){
+  const lc = levelCrossing;
+  const quads = [];
+  for(const z of [lc.z-16, lc.z+16]){
+    quads.push(...buildBarrierQuads(lc.x-(ROAD_HALF-3), z, barrierT, 1));
+    quads.push(...buildBarrierQuads(lc.x+(ROAD_HALF-3), z, barrierT, -1));
+  }
+  return quads;
+}
+function buildTrainQuads(trainT){
+  const lc = levelCrossing;
+  const quads = [];
+  const span = 420;
+  const headX = lc.x - span/2 + trainT*span;
+  const carColors = ['rgb(58,78,68)','rgb(68,90,78)','rgb(58,78,68)','rgb(68,90,78)'];
+  const roof = 'rgb(44,60,52)';
+  const carLen = 24, gap = 3, h = 14;
+  for(let i=0;i<carColors.length;i++){
+    const cx = headX - i*(carLen+gap);
+    const x0 = cx-carLen/2, x1 = cx+carLen/2;
+    const z0 = lc.z-5, z1 = lc.z+5;
+    quads.push({pts:[[x0,0,z0],[x0,h,z0],[x1,h,z0],[x1,0,z0]], color:carColors[i]});
+    quads.push({pts:[[x1,0,z1],[x1,h,z1],[x0,h,z1],[x0,0,z1]], color:carColors[i]});
+    quads.push({pts:[[x0,h,z0],[x0,h,z1],[x1,h,z1],[x1,h,z0]], color:roof});
+  }
+  return quads;
+}
+
+// --- a circling police helicopter, pure flavor — flies above everything,
+// no collision, just atmosphere (and a sweeping spotlight on the ground) ---
+function helicopterPos(t){
+  const a = t*HELI_SPEED;
+  return {x:Math.cos(a)*HELI_RADIUS, z:Math.sin(a)*HELI_RADIUS, y:HELI_HEIGHT, heading:a+Math.PI/2};
+}
+function buildHelicopterQuads(h){
+  const s = Math.sin(h.heading), c = Math.cos(h.heading);
+  function tw(lx, ly, lz){ return [h.x + (lx*c + lz*s), h.y+ly, h.z + (-lx*s + lz*c)]; }
+  const body = 'rgb(38,40,44)', bodyLight = 'rgb(58,61,66)', glass = 'rgb(55,78,92)';
+  const quads = [];
+  const HW=4, NOSE=10, TAIL=-4, CB=-2, CT=3;
+  const cB=[tw(-HW,CB,TAIL),tw(HW,CB,TAIL),tw(HW,CB,NOSE),tw(-HW,CB,NOSE)];
+  const cT=[tw(-HW,CT,TAIL),tw(HW,CT,TAIL),tw(HW,CT,NOSE),tw(-HW,CT,NOSE)];
+  quads.push({pts:[cB[0],cT[0],cT[1],cB[1]], color:body});
+  quads.push({pts:[cB[1],cT[1],cT[2],cB[2]], color:glass});
+  quads.push({pts:[cB[2],cT[2],cT[3],cB[3]], color:bodyLight});
+  quads.push({pts:[cB[3],cT[3],cT[0],cB[0]], color:glass});
+  quads.push({pts:[cT[0],cT[1],cT[2],cT[3]], color:bodyLight});
+  quads.push({pts:[tw(-1,CB,TAIL),tw(1,CB,TAIL),tw(1,CB+1.5,TAIL-14),tw(-1,CB+1.5,TAIL-14)], color:body});
+
+  // main rotor blur — spins independent of the fuselage heading, in world space
+  const rotorY = h.y+CT+2.5;
+  const spin = worldTime*8;
+  const blade = 'rgba(25,25,28,0.5)';
+  for(let i=0;i<2;i++){
+    const a = spin + i*Math.PI/2;
+    const dx = Math.cos(a)*13, dz = Math.sin(a)*13;
+    quads.push({pts:[[h.x-dx,rotorY,h.z-dz],[h.x+dx,rotorY,h.z+dz],[h.x+dx,rotorY+0.4,h.z+dz],[h.x-dx,rotorY+0.4,h.z-dz]], color:blade});
+  }
+  return quads;
+}
+
 function drawScene(){
   // sky
   const grad = ctx.createLinearGradient(0,0,0,HORIZON_Y);
@@ -2662,6 +2767,32 @@ function drawScene(){
     for(const q of buildZebraQuads(cr.x, cr.z, cr.axis)){
       const proj = projectFace(q.pts, cam);
       if(proj) polyFill(proj, q.color, null);
+    }
+  }
+
+  // level-crossing rails — a short visible stretch either side of the
+  // one street that has one, not the whole world width
+  if(dist2(cam.x,cam.z,levelCrossing.x,levelCrossing.z) < RENDER_DIST*RENDER_DIST){
+    const lc = levelCrossing, railColor = 'rgba(120,110,95,0.85)', tieColor = 'rgba(90,70,55,0.8)';
+    for(const dz of [-3,3]){
+      const pts = [[lc.x-140,0.14,lc.z+dz-0.8],[lc.x+140,0.14,lc.z+dz-0.8],[lc.x+140,0.14,lc.z+dz+0.8],[lc.x-140,0.14,lc.z+dz+0.8]];
+      const proj = projectFace(pts, cam);
+      if(proj) polyFill(proj, railColor, null);
+    }
+    for(let x=lc.x-140; x<lc.x+140; x+=14){
+      const pts = [[x,0.13,lc.z-5],[x+6,0.13,lc.z-5],[x+6,0.13,lc.z+5],[x,0.13,lc.z+5]];
+      const proj = projectFace(pts, cam);
+      if(proj) polyFill(proj, tieColor, null);
+    }
+  }
+
+  // helicopter spotlight — a soft tinted patch on the ground beneath it
+  {
+    const heli = helicopterPos(worldTime);
+    if(dist2(cam.x,cam.z,heli.x,heli.z) < RENDER_DIST*RENDER_DIST){
+      const pts = [[heli.x-24,0.18,heli.z-24],[heli.x+24,0.18,heli.z-24],[heli.x+24,0.18,heli.z+24],[heli.x-24,0.18,heli.z+24]];
+      const proj = projectFace(pts, cam);
+      if(proj) polyFill(proj, 'rgba(255,245,200,0.16)', null);
     }
   }
 
@@ -2765,6 +2896,25 @@ function drawScene(){
     if(d > nearDistSq) continue;
     for(const f of buildDogQuads(dg)){
       allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
+    }
+  }
+  if(dist2(cam.x,cam.z,levelCrossing.x,levelCrossing.z) < RENDER_DIST*RENDER_DIST){
+    const lcState = levelCrossingState(worldTime);
+    for(const f of buildLevelCrossingBarriers(lcState.barrierT)){
+      allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
+    }
+    if(lcState.phase === 'closed'){
+      for(const f of buildTrainQuads(lcState.trainT)){
+        allFaces.push({pts:f.pts, color:f.color, stroke:'rgba(0,0,0,0.5)', width:1, depth:faceDepth(f.pts, cam)});
+      }
+    }
+  }
+  {
+    const heli = helicopterPos(worldTime);
+    if(dist2(cam.x,cam.z,heli.x,heli.z) < RENDER_DIST*RENDER_DIST){
+      for(const f of buildHelicopterQuads(heli)){
+        allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
+      }
     }
   }
   for(const car of allCars()){
