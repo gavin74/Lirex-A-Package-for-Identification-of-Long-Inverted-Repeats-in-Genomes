@@ -148,7 +148,8 @@
           <span class="keys">&larr; &rarr; / A D</span> change lane&nbsp;&nbsp;
           <span class="keys">Q / E</span> turn left / right at the next corner<br>
           <span class="keys">SPACE</span> fire&nbsp;&nbsp;
-          <span class="keys">H</span> horn<br>
+          <span class="keys">H</span> horn&nbsp;&nbsp;
+          <span class="keys">T</span> radio<br>
           <span class="keys">M</span> mute&nbsp;&nbsp;
           <span class="keys">R</span> restart
         </p>
@@ -250,6 +251,39 @@ let worldTime = 0;     // elapsed play time, drives party-building light cycles
 
 function cellCenter(i, n){ return (i - n/2 + 0.5) * BLOCK; }
 
+// a real skyline mix: mostly low- and mid-rise, with the occasional
+// tower, rather than one smooth random range. Takes its own half-widths
+// so a split block (see the alley carve-out below) can hand it a
+// narrower footprint than a normal full-block building.
+function makeBuildingAt(cx, cz, halfX, halfZ, rnd){
+  const roll = rnd();
+  let h;
+  if(roll < 0.4) h = 34 + rnd()*44;
+  else if(roll < 0.78) h = 78 + rnd()*95;
+  else h = 175 + rnd()*165;
+  const shade = 0.75 + rnd()*0.25;
+  const tint = BUILDING_TINTS[Math.floor(rnd()*BUILDING_TINTS.length)];
+  // one in ~16 is a club with its own light show — split evenly across
+  // three flavors, each with its own lighting cycle and (see ClubAudio)
+  // its own music that fades in as you drive past
+  const clubRoll = rnd();
+  const clubType = clubRoll < 0.02 ? 'jazz' : clubRoll < 0.04 ? 'rock' : clubRoll < 0.06 ? 'dance' : null;
+
+  const cols = 3 + Math.floor(rnd()*2);
+  const rows = Math.max(1, Math.floor((h-24)/26));
+  const litProb = 0.25 + rnd()*0.55;
+  const windows = [];
+  for(let r=0;r<rows;r++){
+    const row = [];
+    for(let c=0;c<cols;c++) row.push(rnd() < litProb);
+    windows.push(row);
+  }
+  return {
+    x1:cx-halfX, x2:cx+halfX, z1:cz-halfZ, z2:cz+halfZ,
+    h, shade, tint, cols, rows, windows, clubType
+  };
+}
+
 function generateCity(seed){
   buildings = [];
   gasPads = [];
@@ -265,36 +299,22 @@ function generateCity(seed){
         gasPads.push(pad);
         continue;
       }
-      // a real skyline mix: mostly low- and mid-rise, with the occasional
-      // tower, rather than one smooth random range
-      const roll = rnd();
-      let h;
-      if(roll < 0.4) h = 34 + rnd()*44;
-      else if(roll < 0.78) h = 78 + rnd()*95;
-      else h = 175 + rnd()*165;
-      const shade = 0.75 + rnd()*0.25;
-      const tint = BUILDING_TINTS[Math.floor(rnd()*BUILDING_TINTS.length)];
-      // one in ~16 is a club with its own light show — split evenly across
-      // three flavors, each with its own lighting cycle and (see ClubAudio)
-      // its own music that fades in as you drive past
-      const clubRoll = rnd();
-      const clubType = clubRoll < 0.02 ? 'jazz' : clubRoll < 0.04 ? 'rock' : clubRoll < 0.06 ? 'dance' : null;
-
-      const cols = 3 + Math.floor(rnd()*2);
-      const rows = Math.max(1, Math.floor((h-24)/26));
-      const litProb = 0.25 + rnd()*0.55;
-      const windows = [];
-      for(let r=0;r<rows;r++){
-        const row = [];
-        for(let c=0;c<cols;c++) row.push(rnd() < litProb);
-        windows.push(row);
+      // one block in ~7 is split into two buildings with a narrow alley
+      // between them, a cut-through the player can actually squeeze down
+      if(rnd() < 0.14){
+        const alleyW = 26;
+        const halfEach = (BUILD_HALF*2-alleyW)/4;
+        const off = alleyW/2+halfEach;
+        if(rnd()<0.5){
+          buildings.push(makeBuildingAt(cx-off, cz, halfEach, BUILD_HALF, rnd));
+          buildings.push(makeBuildingAt(cx+off, cz, halfEach, BUILD_HALF, rnd));
+        } else {
+          buildings.push(makeBuildingAt(cx, cz-off, BUILD_HALF, halfEach, rnd));
+          buildings.push(makeBuildingAt(cx, cz+off, BUILD_HALF, halfEach, rnd));
+        }
+      } else {
+        buildings.push(makeBuildingAt(cx, cz, BUILD_HALF, BUILD_HALF, rnd));
       }
-
-      buildings.push({
-        x1:cx-BUILD_HALF, x2:cx+BUILD_HALF,
-        z1:cz-BUILD_HALF, z2:cz+BUILD_HALF,
-        h, shade, tint, cols, rows, windows, clubType
-      });
     }
   }
   streetLinesX = [];
@@ -517,7 +537,7 @@ function updateBlink(dt){
   if(fastBlinkClock <= 0){ fastBlinkOn = !fastBlinkOn; fastBlinkClock = 0.15; }
 }
 
-let player, suspect, police, ambulances, fireTrucks, dumpTrucks, motorbikes, vans, ebikes, civilians, particles;
+let player, suspect, police, ambulances, fireTrucks, dumpTrucks, buses, motorbikes, vans, ebikes, civilians, particles;
 let bullets = [];
 const CIVILIAN_COLORS = ['#b9bdb2', '#8a9bb0', '#a98f6e', '#8f8f94', '#9bb08a', '#b08a8a'];
 let score, caught, timeLeft, fuel, gameState, roundLevel;
@@ -563,6 +583,10 @@ function resetGame(){
   dumpTrucks = [];
   for(let i=0;i<2;i++){
     dumpTrucks.push(spawnStreetCar('#e8b430', 65, 'dumptruck'));
+  }
+  buses = [];
+  for(let i=0;i<2;i++){
+    buses.push(spawnStreetCar('#b0221e', 75, 'bus'));
   }
   motorbikes = [];
   for(let i=0;i<3;i++){
@@ -633,6 +657,7 @@ window.addEventListener('keydown', e=>{
   if((k==='e') && !e.repeat) queueTurn('right');
   if(k===' ' && !e.repeat) fireGun();
   if(k==='h' && !e.repeat) honk();
+  if(k==='t' && !e.repeat) cycleRadio();
   if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k)) e.preventDefault();
 });
 window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
@@ -897,7 +922,33 @@ const SFX = (function(){
     }
   }
 
-  return { crash, bust, gunshot, horn };
+  // tire screech: filtered noise through a resonant bandpass that sweeps
+  // down in pitch, the same "scratchy skid" trick used in countless
+  // arcade racers, built from noise rather than a sample
+  function screech(){
+    const ac = ctx();
+    if(!ac || Engine.isMuted) return;
+    const now = ac.currentTime;
+    const len = Math.floor(ac.sampleRate*0.45);
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for(let i=0;i<len;i++) data[i] = (Math.random()*2-1) * Math.min(1, (len-i)/(len*0.3));
+    const noise = ac.createBufferSource(); noise.buffer = buf;
+
+    const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 8;
+    bp.frequency.setValueAtTime(2200, now);
+    bp.frequency.exponentialRampToValueAtTime(900, now+0.42);
+
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.linearRampToValueAtTime(0.14, now+0.03);
+    g.gain.exponentialRampToValueAtTime(0.001, now+0.45);
+
+    noise.connect(bp); bp.connect(g); g.connect(ac.destination);
+    noise.start(now);
+  }
+
+  return { crash, bust, gunshot, horn, screech };
 })();
 
 // ---------------------------------------------------------------
@@ -1138,6 +1189,27 @@ function updatePlayer(dt){
   const yaw = clamp(laneVel / LANE_SPEED, -1, 1) * 0.3 * player.dir;
   player.visualHeading = player.heading + yaw;
 
+  // a corner taken at speed banks the car over — "two wheels" lean. Driven
+  // directly by how far mid-turn the heading still has to catch up to its
+  // target, so it eases in and out with the same swing approachHeading
+  // already animates, and only shows up when actually moving fast.
+  let headingGap = player.targetHeading - player.heading;
+  while(headingGap > Math.PI) headingGap -= Math.PI*2;
+  while(headingGap < -Math.PI) headingGap += Math.PI*2;
+  const speedFrac = clamp(Math.abs(player.speed)/player.maxSpeed, 0, 1);
+  player.roll = clamp(headingGap/(Math.PI/2), -1, 1) * 0.26 * speedFrac;
+
+  // tires screech on a hard, fast turn or a hard stop from speed —
+  // debounced so it fires once per event, not every frame it's true
+  const cornering = Math.abs(headingGap) > 0.15 && Math.abs(player.speed) > 70;
+  const hardBraking = brake && Math.abs(player.speed) > 100;
+  if((cornering || hardBraking) && !player.screeching){
+    SFX.screech();
+    player.screeching = true;
+  } else if(!cornering && !hardBraking){
+    player.screeching = false;
+  }
+
   const fixedCoord = player.streetCoord + player.laneOffset;
   let nx, nz;
   if(player.axis==='z'){ nz = player.z + player.dir*player.speed*dt; nx = fixedCoord; }
@@ -1276,7 +1348,7 @@ function updateStreetCar(car, dt){
 
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
-function allTraffic(){ return [...police, ...ambulances, ...fireTrucks, ...dumpTrucks, ...motorbikes, ...vans, ...ebikes, ...civilians]; }
+function allTraffic(){ return [...police, ...ambulances, ...fireTrucks, ...dumpTrucks, ...buses, ...motorbikes, ...vans, ...ebikes, ...civilians]; }
 function allCars(){ return [player, suspect, ...allTraffic()]; }
 
 // Getting too close to any moving traffic costs time and speed — just
@@ -1338,6 +1410,17 @@ function levelCrossingBlocked(car){
 }
 
 const CLUB_AUDIO_RADIUS = 230;
+// tune the radio (T) to a station and it plays at a constant low volume
+// no matter where you are, same as the proximity fade would still boost
+// it further if you happen to drive past a matching club
+let radioStation = null;
+const RADIO_CYCLE = [null, 'jazz', 'rock', 'dance'];
+function cycleRadio(){
+  if(gameState!=='playing') return;
+  radioStation = RADIO_CYCLE[(RADIO_CYCLE.indexOf(radioStation)+1) % RADIO_CYCLE.length];
+  showBanner(radioStation ? 'RADIO: ' + radioStation.toUpperCase() : 'RADIO OFF', 1.0);
+}
+
 function updateClubAudio(){
   const levels = {jazz:0, rock:0, dance:0};
   for(const b of buildings){
@@ -1350,6 +1433,7 @@ function updateClubAudio(){
       if(vol > levels[b.clubType]) levels[b.clubType] = vol;
     }
   }
+  if(radioStation) levels[radioStation] = Math.max(levels[radioStation], 0.22);
   ClubAudio.update(levels, Engine.isMuted);
 }
 
@@ -1868,6 +1952,7 @@ function buildVehicleQuads(car){
   if(car.type === 'ambulance') return buildAmbulanceQuads(car);
   if(car.type === 'firetruck') return buildFireTruckQuads(car);
   if(car.type === 'dumptruck') return buildDumpTruckQuads(car);
+  if(car.type === 'bus') return buildBusQuads(car);
   if(car.type === 'police') return buildPoliceQuads(car);
   if(car.type === 'van') return buildVanQuads(car);
   if(car.type === 'sports') return buildSportsQuads(car);
@@ -1975,8 +2060,18 @@ function buildPoliceQuads(car){
 // a side intake scoop, a two-tone rocker panel and a rear spoiler, so it
 // reads as a shape rather than a flat-sided box.
 function buildSportsQuads(car){
-  const s = Math.sin(car.heading), c = Math.cos(car.heading);
-  function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
+  const h = car.visualHeading ?? car.heading;
+  const s = Math.sin(h), c = Math.cos(h);
+  // a cosmetic lean into hard corners/lane changes — rotate the local
+  // cross-section around the car's own forward axis before placing it in
+  // the world, so it reads as banking onto two wheels rather than just
+  // snapping to a new heading
+  const roll = car.roll || 0;
+  const rs = Math.sin(roll), rc = Math.cos(roll);
+  function tw(lx, ly, lz){
+    const rx = lx*rc - ly*rs, ry = lx*rs + ly*rc;
+    return [car.x + (rx*c + lz*s), ry, car.z + (-rx*s + lz*c)];
+  }
 
   const rgb = carColorRGB(car.color);
   const body = shadeColor(rgb, 1.0);
@@ -2406,6 +2501,59 @@ function buildFireTruckQuads(car){
     const amber = 'rgb(255,170,20)';
     quads.push({pts:[tw(bx-1.6,5,NOSE+0.4),tw(bx+1.6,5,NOSE+0.4),tw(bx+1.6,6.8,NOSE+0.4),tw(bx-1.6,6.8,NOSE+0.4)], color:amber});
     quads.push({pts:[tw(bx-1.6,5,TAIL-0.4),tw(bx+1.6,5,TAIL-0.4),tw(bx+1.6,6.8,TAIL-0.4),tw(bx-1.6,6.8,TAIL-0.4)], color:amber});
+  }
+
+  return quads;
+}
+
+// A big red bus — a London-bus nod, tall and boxy with a strip of upper
+// windows along each side, built for the "not modern" aesthetic.
+function buildBusQuads(car){
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
+
+  const red = 'rgb(176,34,30)', redDark = 'rgb(140,26,24)', redLight = 'rgb(205,55,48)';
+  const white = 'rgb(232,230,222)';
+  const glass = 'rgb(40,46,54)';
+  const tire = 'rgb(16,16,18)';
+  const headlight = 'rgb(255,248,222)';
+  const taillight = car.braking ? 'rgb(255,50,40)' : 'rgb(206,64,54)';
+
+  const HW=9, NOSE=20, TAIL=-20, CB=3, CT=24;
+  const quads=[];
+  const cB=[tw(-HW,CB,TAIL),tw(HW,CB,TAIL),tw(HW,CB,NOSE),tw(-HW,CB,NOSE)];
+  const cT=[tw(-HW,CT,TAIL),tw(HW,CT,TAIL),tw(HW,CT,NOSE),tw(-HW,CT,NOSE)];
+  quads.push({pts:[cB[0],cT[0],cT[1],cB[1]], color:redDark});
+  quads.push({pts:[cB[1],cT[1],cT[2],cB[2]], color:redLight});
+  quads.push({pts:[cB[2],cT[2],cT[3],cB[3]], color:red});
+  quads.push({pts:[cB[3],cT[3],cT[0],cB[0]], color:redDark});
+  quads.push({pts:[cT[0],cT[1],cT[2],cT[3]], color:white});
+
+  quads.push({pts:[tw(HW,8,TAIL+2),tw(HW,8,NOSE-2),tw(HW,10,NOSE-2),tw(HW,10,TAIL+2)], color:white});
+  quads.push({pts:[tw(-HW,8,NOSE-2),tw(-HW,8,TAIL+2),tw(-HW,10,TAIL+2),tw(-HW,10,NOSE-2)], color:white});
+
+  for(let i=0;i<5;i++){
+    const z0 = TAIL+5+i*7, z1=z0+5;
+    quads.push({pts:[tw(HW,13,z0),tw(HW,13,z1),tw(HW,19,z1),tw(HW,19,z0)], color:glass});
+    quads.push({pts:[tw(-HW,13,z1),tw(-HW,13,z0),tw(-HW,19,z0),tw(-HW,19,z1)], color:glass});
+  }
+  quads.push({pts:[tw(-HW+1.5,13,NOSE-0.2),tw(HW-1.5,13,NOSE-0.2),tw(HW-1.5,19,NOSE-0.2),tw(-HW+1.5,19,NOSE-0.2)], color:glass});
+  quads.push(...buildDriverQuads(tw, 7, NOSE-3));
+
+  quads.push({pts:[tw(-HW+1.5,5,TAIL),tw(-5,5,TAIL),tw(-5,7.5,TAIL),tw(-HW+1.5,7.5,TAIL)], color:taillight});
+  quads.push({pts:[tw(5,5,TAIL),tw(HW-1.5,5,TAIL),tw(HW-1.5,7.5,TAIL),tw(5,7.5,TAIL)], color:taillight});
+  quads.push({pts:[tw(-HW,0,TAIL+2),tw(-HW+4,0,TAIL+2),tw(-HW+4,CB,TAIL+2),tw(-HW,CB,TAIL+2)], color:tire});
+  quads.push({pts:[tw(HW-4,0,TAIL+2),tw(HW,0,TAIL+2),tw(HW,CB,TAIL+2),tw(HW-4,CB,TAIL+2)], color:tire});
+  quads.push({pts:[tw(-HW+1.5,5,NOSE),tw(-5,5,NOSE),tw(-5,7.5,NOSE),tw(-HW+1.5,7.5,NOSE)], color:headlight});
+  quads.push({pts:[tw(5,5,NOSE),tw(HW-1.5,5,NOSE),tw(HW-1.5,7.5,NOSE),tw(5,7.5,NOSE)], color:headlight});
+  quads.push({pts:[tw(-HW,0,NOSE-2),tw(-HW+4,0,NOSE-2),tw(-HW+4,CB,NOSE-2),tw(-HW,CB,NOSE-2)], color:tire});
+  quads.push({pts:[tw(HW-4,0,NOSE-2),tw(HW,0,NOSE-2),tw(HW,CB,NOSE-2),tw(HW-4,CB,NOSE-2)], color:tire});
+
+  if(blinkOn && car.signal){
+    const bx = (car.signal==='left' ? -1 : 1) * (HW - 1.5);
+    const amber = 'rgb(255,170,20)';
+    quads.push({pts:[tw(bx-1.8,6,NOSE+0.4),tw(bx+1.8,6,NOSE+0.4),tw(bx+1.8,8,NOSE+0.4),tw(bx-1.8,8,NOSE+0.4)], color:amber});
+    quads.push({pts:[tw(bx-1.8,6,TAIL-0.4),tw(bx+1.8,6,TAIL-0.4),tw(bx+1.8,8,TAIL-0.4),tw(bx-1.8,8,TAIL-0.4)], color:amber});
   }
 
   return quads;
@@ -3045,6 +3193,7 @@ police = [spawnStreetCar('#6fa8ff', 90, 'police')];
 ambulances = [spawnStreetCar('#f0f0e6', 85, 'ambulance')];
 fireTrucks = [spawnStreetCar('#c42822', 100, 'firetruck')];
 dumpTrucks = [spawnStreetCar('#e8b430', 65, 'dumptruck')];
+buses = [spawnStreetCar('#b0221e', 75, 'bus')];
 motorbikes = [spawnStreetCar('#ff6a3d', 180, 'motorbike')];
 vans = [spawnStreetCar('#9aa08f', 80, 'van')];
 ebikes = [spawnStreetCar('#6fa070', 60, 'ebike')];
