@@ -133,12 +133,13 @@
         <h1>TURBO CIRCUIT</h1>
         <h2>a tribute to Turbo Esprit (ZX Spectrum, 1986)</h2>
         <p>
-          Drive the grey city grid and run down the amber
-          <b>suspect car</b> before the clock runs out.
-          Get close at speed to make the bust. Clip a building and
-          you'll stall; clip a <b style="color:#6fa8ff">police car</b>,
-          an <b style="color:#f0f0e6">ambulance</b> or a fast
-          <b style="color:#ff6a3d">motorbike</b> and you'll lose time.
+          Tail the amber <b>suspect car</b> through the grey city grid.
+          Get close before they clock you and they'll bolt — once
+          spotted they're faster, so close in quietly. Get close at
+          speed to make the bust before time runs out. Clip a building
+          and you'll stall; clip traffic — a <b style="color:#6fa8ff">police
+          car</b>, an <b style="color:#f0f0e6">ambulance</b>, a van, a bike
+          or an ebike — and you'll lose a little time.
         </p>
         <p>
           <span class="keys">&uarr; / W</span> accelerate&nbsp;&nbsp;
@@ -170,10 +171,14 @@ const FOV_FOCAL = 260;
 const HORIZON_Y = 205;
 const CAM_HEIGHT = 34;
 const CAM_BACK = 30;
-const CATCH_RADIUS = 22;
-const START_TIME = 95;
-const CATCH_BONUS_TIME = 16;
+const CATCH_RADIUS = 24;
+const START_TIME = 110;
+const CATCH_BONUS_TIME = 18;
 const START_FUEL = 100;
+const SPOT_RADIUS = 170;           // how close before the suspect notices you and bolts
+const FLEE_SPEED_MULT = 1.25;      // speed boost once the suspect is fleeing
+const HAZARD_COOLDOWN = 1.0;       // min seconds between hazard penalties, so lingering near
+                                    // one doesn't reapply the penalty every single frame
 const LANE_OFFSET = 16;            // distance of each lane from the street centerline
 const LANE_SPEED = 70;             // lateral units/sec when changing lanes
 const TURN_RATE = 6;               // rad/sec the player's visual heading animates at
@@ -295,7 +300,7 @@ function makeCar(x,z,heading,color,maxSpeed){
   return {x,z,heading,targetHeading:heading,speed:0,color,maxSpeed,type:'car',
            axis:'z', dir:1, turnCooldown:0, alive:true,
            lane:0, laneOffset:0, streetCoord:0,
-           signal:null, signalTimer:0};
+           signal:null, signalTimer:0, fleeing:false};
 }
 
 // Driving directions as a 4-state cycle (compass convention: heading 0 =
@@ -334,7 +339,8 @@ function updateBlink(dt){
   if(fastBlinkClock <= 0){ fastBlinkOn = !fastBlinkOn; fastBlinkClock = 0.15; }
 }
 
-let player, suspect, police, ambulances, motorbikes, particles;
+let player, suspect, police, ambulances, motorbikes, vans, ebikes, civilians, particles;
+const CIVILIAN_COLORS = ['#b9bdb2', '#8a9bb0', '#a98f6e', '#8f8f94', '#9bb08a', '#b08a8a'];
 let score, caught, timeLeft, fuel, gameState, roundLevel;
 let lastSuspectSpawnGuardTimer = 0;
 let bannerTimer = 0;
@@ -344,7 +350,9 @@ function spawnPlayerStart(){
   const x = nearestStreet(streetLinesX, 0);
   const z = nearestStreet(streetLinesZ, -worldHalfZ+150);
   const car = makeCar(x, z, 0, '#e8e8e8', 220);
+  car.type = 'sports';
   car.crashCooldown = 0;
+  car.hazardCooldown = 0;
   car.streetCoord = x;
   car.lane = 1;
   return car;
@@ -359,7 +367,7 @@ function resetGame(){
   suspect = null;
   police = [];
   for(let i=0;i<3;i++){
-    police.push(spawnStreetCar('#6fa8ff', 95));
+    police.push(spawnStreetCar('#6fa8ff', 95, 'police'));
   }
   ambulances = [];
   for(let i=0;i<2;i++){
@@ -368,6 +376,18 @@ function resetGame(){
   motorbikes = [];
   for(let i=0;i<3;i++){
     motorbikes.push(spawnStreetCar('#ff6a3d', 180, 'motorbike'));
+  }
+  vans = [];
+  for(let i=0;i<2;i++){
+    vans.push(spawnStreetCar('#9aa08f', 80, 'van'));
+  }
+  ebikes = [];
+  for(let i=0;i<2;i++){
+    ebikes.push(spawnStreetCar('#6fa070', 60, 'ebike'));
+  }
+  civilians = [];
+  for(let i=0;i<3;i++){
+    civilians.push(spawnStreetCar(CIVILIAN_COLORS[Math.floor(Math.random()*CIVILIAN_COLORS.length)], 110));
   }
   spawnSuspect();
   gameState = 'playing';
@@ -394,7 +414,8 @@ function spawnStreetCar(color, speed, type){
 
 function spawnSuspect(){
   roundLevel++;
-  suspect = spawnStreetCar('#e8b23a', 118 + roundLevel*7);
+  suspect = spawnStreetCar('#e8b23a', 118 + roundLevel*7, 'sports');
+  suspect.fleeing = false;
   // keep it away from the player a bit
   let tries = 0;
   while(dist2(suspect.x,suspect.z,player.x,player.z) < 300*300 && tries<20){
@@ -434,18 +455,22 @@ function startGame(){
 
 // ---------------------------------------------------------------
 // Engine sound — synthesized with the Web Audio API, no audio files.
-// Deliberately simple: one sawtooth (all the harmonic "buzz" an engine
-// needs comes from a sawtooth on its own) plus a triangle sub an octave
-// down for weight, through light saturation into a lowpass filter whose
-// cutoff tracks the pitch. Earlier passes had two detuned sawtooths and
-// a very low (36Hz) fundamental; the detune added an audible phasey
-// warble and the low fundamental barely reproduces on small speakers,
-// which likely read as "thin"/"buzzy" rather than engine-like. This
-// version sits higher and louder so it's clearly audible, and drops the
-// second oscillator so there's nothing to beat against it.
+//
+// The last two passes kept sounding like a buzzer, and the real reason
+// is that a sawtooth held at a perfectly steady amplitude IS a buzz —
+// that's what a buzzer literally is. A combustion engine doesn't emit a
+// constant tone; each cylinder fires, so the amplitude pulses at a rate
+// tied to RPM. That pulsing ("chug") is the one thing missing before,
+// no amount of filter/detune tweaking was going to fix it. So: a
+// sawtooth + sub triangle, through a duller pitch-tracking filter (lower
+// cutoff multiplier and Q than before, so less bare harmonic content
+// gets through), then through a dedicated gain stage that a second
+// oscillator amplitude-modulates at an RPM-linked rate — that's the
+// chug. Filtered road noise still rises with speed for texture.
 // ---------------------------------------------------------------
 const Engine = (function(){
-  let ac = null, osc, sub, lfo, lfoGain;
+  let ac = null, osc, sub;
+  let chugLfo, chugDepth, chugGain;
   let noiseSrc, noiseFilter, noiseGain;
   let shaper, filter, gainMaster;
   let started = false, muted = false, currentVol = 0;
@@ -481,29 +506,35 @@ const Engine = (function(){
     osc = ac.createOscillator(); osc.type = 'sawtooth';
     sub = ac.createOscillator(); sub.type = 'triangle';
 
-    lfo = ac.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 6.5;
-    lfoGain = ac.createGain(); lfoGain.gain.value = 1.4;
-    lfo.connect(lfoGain);
-    lfoGain.connect(osc.frequency);
-
     const mix = ac.createGain(); mix.gain.value = 1;
-    const subGain = ac.createGain(); subGain.gain.value = 0.7;
+    const subGain = ac.createGain(); subGain.gain.value = 0.85;
     osc.connect(mix);
     sub.connect(subGain); subGain.connect(mix);
 
     shaper = ac.createWaveShaper();
-    shaper.curve = softCurve(0.9);
+    shaper.curve = softCurve(0.8);
     mix.connect(shaper);
 
     filter = ac.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = 600;
-    filter.Q.value = 1.0;
+    filter.frequency.value = 260;
+    filter.Q.value = 0.5;
     shaper.connect(filter);
+
+    // the "chug": a low-rate oscillator amplitude-modulating the signal
+    // so it pulses like cylinder strokes instead of droning steadily
+    chugGain = ac.createGain();
+    chugGain.gain.value = 0.75;
+    filter.connect(chugGain);
+
+    chugLfo = ac.createOscillator(); chugLfo.type = 'sawtooth'; chugLfo.frequency.value = 9;
+    chugDepth = ac.createGain(); chugDepth.gain.value = 0.3;
+    chugLfo.connect(chugDepth);
+    chugDepth.connect(chugGain.gain);
 
     gainMaster = ac.createGain();
     gainMaster.gain.value = 0;
-    filter.connect(gainMaster);
+    chugGain.connect(gainMaster);
 
     noiseSrc = ac.createBufferSource();
     noiseSrc.buffer = makeNoiseBuffer();
@@ -520,7 +551,7 @@ const Engine = (function(){
 
     gainMaster.connect(ac.destination);
 
-    osc.start(); sub.start(); lfo.start(); noiseSrc.start();
+    osc.start(); sub.start(); chugLfo.start(); noiseSrc.start();
     if(ac.state === 'suspended') ac.resume();
   }
 
@@ -543,20 +574,21 @@ const Engine = (function(){
     const GEARS = 4;
     const span = maxSpeed / GEARS;
     const gearPos = spd <= 1 ? 0 : (spd % span) / span;
-    const idleHz = 58, revHz = 205;
+    const idleHz = 55, revHz = 190;
     const baseHz = idleHz + gearPos * (revHz - idleHz);
 
     osc.frequency.setTargetAtTime(baseHz, now, 0.06);
     sub.frequency.setTargetAtTime(baseHz * 0.5, now, 0.06);
 
-    // the idle lope smooths out once the engine is actually spinning
-    lfoGain.gain.setTargetAtTime(Math.max(0, 1.4*(1-gearPos*1.6)), now, 0.2);
+    // chug rate climbs with revs — distinct "putt-putt" at idle, blurs
+    // into a faster pulse at speed, which is how a real engine behaves
+    chugLfo.frequency.setTargetAtTime(9 + gearPos*15, now, 0.15);
 
     const throttleBoost = throttleOn ? 1 : 0;
-    // cutoff tracks the fundamental so the harmonic balance stays
-    // consistent at any RPM instead of sounding buzzy at some and muffled
-    // at others
-    filter.frequency.setTargetAtTime(baseHz*6 + 320 + throttleBoost*450, now, 0.1);
+    // cutoff tracks the fundamental, but deliberately duller than a real
+    // formant so idle stays a muffled rumble rather than a bright buzz —
+    // throttle opens it up for the roar
+    filter.frequency.setTargetAtTime(baseHz*2.4 + 140 + throttleBoost*300, now, 0.1);
 
     noiseFilter.frequency.setTargetAtTime(500 + spd*3.2, now, 0.15);
     noiseGain.gain.setTargetAtTime(Math.min(spd/maxSpeed,1)*0.03, now, 0.15);
@@ -565,7 +597,62 @@ const Engine = (function(){
     gainMaster.gain.setTargetAtTime(muted ? 0 : currentVol, now, 0.1);
   }
 
-  return { init, update, setMuted, get isMuted(){ return muted; } };
+  function getContext(){ return ac; }
+
+  return { init, update, setMuted, getContext, get isMuted(){ return muted; } };
+})();
+
+// ---------------------------------------------------------------
+// One-shot sound effects, sharing the engine's AudioContext.
+// ---------------------------------------------------------------
+const SFX = (function(){
+  function ctx(){ return Engine.getContext(); }
+
+  function crash(){
+    const ac = ctx();
+    if(!ac || Engine.isMuted) return;
+    const now = ac.currentTime;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.linearRampToValueAtTime(0.32, now+0.012);
+    g.gain.exponentialRampToValueAtTime(0.001, now+0.26);
+    g.connect(ac.destination);
+
+    const thud = ac.createOscillator(); thud.type = 'triangle';
+    thud.frequency.setValueAtTime(150, now);
+    thud.frequency.exponentialRampToValueAtTime(38, now+0.2);
+    thud.connect(g);
+    thud.start(now); thud.stop(now+0.22);
+
+    const len = Math.floor(ac.sampleRate*0.25);
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for(let i=0;i<len;i++) data[i] = (Math.random()*2-1) * (1 - i/len);
+    const noise = ac.createBufferSource(); noise.buffer = buf;
+    const nf = ac.createBiquadFilter(); nf.type = 'lowpass'; nf.frequency.value = 1000;
+    noise.connect(nf); nf.connect(g);
+    noise.start(now);
+  }
+
+  function bust(){
+    const ac = ctx();
+    if(!ac || Engine.isMuted) return;
+    const now = ac.currentTime;
+    const notes = [523.25, 659.25, 783.99, 1046.5];
+    notes.forEach((f,i)=>{
+      const t0 = now + i*0.07;
+      const o = ac.createOscillator(); o.type = 'square';
+      o.frequency.value = f;
+      const g = ac.createGain();
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(0.16, t0+0.015);
+      g.gain.exponentialRampToValueAtTime(0.0008, t0+0.22);
+      o.connect(g); g.connect(ac.destination);
+      o.start(t0); o.stop(t0+0.24);
+    });
+  }
+
+  return { crash, bust };
 })();
 
 function toggleMute(){
@@ -648,6 +735,7 @@ function updatePlayer(dt){
       fuel -= 3;
       showBanner('CRASH!', 0.6);
       player.crashCooldown = 0.8;
+      SFX.crash();
     }
   }
 
@@ -685,8 +773,28 @@ function updateStreetCar(car, dt){
   for(const line of lines){
     if(Math.abs(moving-line) < 4 && car.turnCooldown<=0){
       car.turnCooldown = 1.0;
-      if(Math.random() >= 0.55){
-        const idx = cardinalIndex(car.axis, car.dir);
+      const idx = cardinalIndex(car.axis, car.dir);
+      if(car.fleeing){
+        // greedily pick whichever of straight/left/right puts the most
+        // distance between this car and the player a short way ahead
+        let best = idx, bestDist = -Infinity;
+        for(const ci of [idx, (idx+1)%4, (idx+3)%4]){
+          const cand = CARDINALS[ci];
+          const h = cardinalHeading(cand.axis, cand.dir);
+          const nx = car.x + Math.sin(h)*60, nz = car.z + Math.cos(h)*60;
+          const d = dist2(nx, nz, player.x, player.z);
+          if(d > bestDist){ bestDist = d; best = ci; }
+        }
+        if(best !== idx){
+          const next = CARDINALS[best];
+          const goRight = best === (idx+1)%4;
+          car.axis = next.axis;
+          car.dir = next.dir;
+          car.heading = cardinalHeading(next.axis, next.dir);
+          car.targetHeading = car.heading;
+          setSignal(car, goRight ? 'right' : 'left', 1.0);
+        }
+      } else if(Math.random() >= 0.55){
         const goRight = Math.random() < 0.5;
         const next = CARDINALS[goRight ? (idx+1)%4 : (idx+3)%4];
         car.axis = next.axis;
@@ -718,16 +826,20 @@ function updateStreetCar(car, dt){
 
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
-function allTraffic(){ return [...police, ...ambulances, ...motorbikes]; }
+function allTraffic(){ return [...police, ...ambulances, ...motorbikes, ...vans, ...ebikes, ...civilians]; }
 function allCars(){ return [player, suspect, ...allTraffic()]; }
 
 // getting too close to any moving traffic costs time and speed — a bigger
 // hit for an ambulance you shouldn't be cutting off, a smaller one for a
-// bike that was probably weaving around you anyway
+// bike or ebike that was probably weaving around you anyway. Kept gentle
+// (and debounced via player.hazardCooldown below) for easy playtesting.
 const HAZARDS = [
-  {list: () => police,      label: 'POLICE',    penalty: 4},
-  {list: () => ambulances,  label: 'AMBULANCE', penalty: 6},
+  {list: () => police,      label: 'POLICE',    penalty: 3},
+  {list: () => ambulances,  label: 'AMBULANCE', penalty: 4},
   {list: () => motorbikes,  label: 'BIKE',      penalty: 2},
+  {list: () => vans,        label: 'VAN',       penalty: 2},
+  {list: () => ebikes,      label: 'EBIKE',     penalty: 1},
+  {list: () => civilians,   label: 'TRAFFIC',   penalty: 1},
 ];
 
 function update(dt){
@@ -742,14 +854,28 @@ function update(dt){
     if(car.signal && (car.signalTimer -= dt) <= 0) car.signal = null;
   }
 
-  for(const hz of HAZARDS){
-    for(const car of hz.list()){
-      if(dist2(player.x,player.z,car.x,car.z) < 26*26){
-        timeLeft -= hz.penalty;
-        player.speed *= 0.3;
-        showBanner(hz.label+'! -'+hz.penalty+'s', 0.9);
+  player.hazardCooldown -= dt;
+  if(player.hazardCooldown <= 0){
+    outer: for(const hz of HAZARDS){
+      for(const car of hz.list()){
+        if(dist2(player.x,player.z,car.x,car.z) < 26*26){
+          timeLeft -= hz.penalty;
+          player.speed *= 0.3;
+          showBanner(hz.label+'! -'+hz.penalty+'s', 0.9);
+          player.hazardCooldown = HAZARD_COOLDOWN;
+          SFX.crash();
+          break outer;
+        }
       }
     }
+  }
+
+  // Turbo Esprit didn't let you just barrel into the suspect from the
+  // start — you tailed them until they noticed you, then they ran.
+  if(!suspect.fleeing && dist2(player.x,player.z,suspect.x,suspect.z) < SPOT_RADIUS*SPOT_RADIUS){
+    suspect.fleeing = true;
+    suspect.speed *= FLEE_SPEED_MULT;
+    showBanner('SPOTTED! PURSUIT!', 1.1);
   }
 
   if(dist2(player.x,player.z,suspect.x,suspect.z) < CATCH_RADIUS*CATCH_RADIUS
@@ -758,6 +884,7 @@ function update(dt){
     caught++;
     timeLeft = Math.min(timeLeft + CATCH_BONUS_TIME, 999);
     showBanner('BUSTED! +' + (100*roundLevel), 1.1);
+    SFX.bust();
     spawnSuspect();
   }
 
@@ -984,7 +1111,11 @@ function carColorRGB(hex){
 
 function buildVehicleQuads(car){
   if(car.type === 'motorbike') return buildMotorbikeQuads(car);
+  if(car.type === 'ebike') return buildEbikeQuads(car);
   if(car.type === 'ambulance') return buildAmbulanceQuads(car);
+  if(car.type === 'police') return buildPoliceQuads(car);
+  if(car.type === 'van') return buildVanQuads(car);
+  if(car.type === 'sports') return buildSportsQuads(car);
   return buildCarQuads(car);
 }
 
@@ -1051,6 +1182,128 @@ function buildCarQuads(car){
   return quads;
 }
 
+// A sedan with a roof light bar — used for police, who were otherwise
+// indistinguishable from any other blue car.
+function buildPoliceQuads(car){
+  const quads = buildCarQuads(car);
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
+  const barY0 = 15.5, barY1 = 18;
+  const redLamp = fastBlinkOn ? 'rgb(255,40,30)' : 'rgb(90,10,10)';
+  const blueLamp = fastBlinkOn ? 'rgb(20,40,110)' : 'rgb(60,90,255)';
+  quads.push({pts:[tw(-4,barY0,-1),tw(0,barY0,-1),tw(0,barY1,-1),tw(-4,barY1,-1)], color:redLamp});
+  quads.push({pts:[tw(0,barY0,-1),tw(4,barY0,-1),tw(4,barY1,-1),tw(0,barY1,-1)], color:blueLamp});
+  return quads;
+}
+
+// A low wedge-nosed sports car for the player and the suspect — a nod to
+// the Lotus Esprit, with a sloped bonnet and a low, rear-set cabin
+// instead of the boxier civilian sedan shape.
+function buildSportsQuads(car){
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
+
+  const rgb = carColorRGB(car.color);
+  const body = shadeColor(rgb, 1.0);
+  const bodyDark = shadeColor(rgb, 0.8);
+  const bodyLight = shadeColor(rgb, 1.18);
+  const glass = 'rgb(38,44,52)';
+  const tire = 'rgb(16,16,18)';
+  const headlight = 'rgb(255,248,222)';
+  const taillight = 'rgb(206,64,54)';
+
+  const HW = 7.0, NOSE = 17, TAIL = -14, CB = 2.5;
+  const NOSE_TOP = 5.5, TAIL_TOP = 9.5;
+  const quads = [];
+
+  const b0 = tw(-HW,CB,TAIL), b1 = tw(HW,CB,TAIL), b2 = tw(HW,CB,NOSE), b3 = tw(-HW,CB,NOSE);
+  const tt0 = tw(-HW,TAIL_TOP,TAIL), tt1 = tw(HW,TAIL_TOP,TAIL);
+  const nt0 = tw(-HW*0.85,NOSE_TOP,NOSE), nt1 = tw(HW*0.85,NOSE_TOP,NOSE);
+
+  quads.push({pts:[b0,tt0,tt1,b1], color:bodyDark});     // tail
+  quads.push({pts:[b2,nt1,nt0,b3], color:body});         // nose (wedge tip)
+  quads.push({pts:[b1,tt1,nt1,b2], color:bodyLight});    // right flank, sloped
+  quads.push({pts:[b3,nt0,tt0,b0], color:bodyDark});     // left flank, sloped
+  quads.push({pts:[tt0,tt1,nt1,nt0], color:bodyLight});  // bonnet/deck, sloped
+
+  // low cabin set toward the rear
+  const CW = 4.6, CAB_N = 1, CAB_T = -8, CAB_BASE = 8, RT = 13;
+  const gB = [tw(-CW,CAB_BASE,CAB_T), tw(CW,CAB_BASE,CAB_T), tw(CW,CAB_BASE,CAB_N), tw(-CW,CAB_BASE,CAB_N)];
+  const gT = [tw(-CW*0.7,RT,CAB_T+2), tw(CW*0.7,RT,CAB_T+2), tw(CW*0.7,RT,CAB_N-3), tw(-CW*0.7,RT,CAB_N-3)];
+  quads.push({pts:[gB[0],gT[0],gT[1],gB[1]], color:glass});
+  quads.push({pts:[gB[1],gT[1],gT[2],gB[2]], color:bodyLight});
+  quads.push({pts:[gB[2],gT[2],gT[3],gB[3]], color:glass});
+  quads.push({pts:[gB[3],gT[3],gT[0],gB[0]], color:bodyLight});
+  quads.push({pts:[gT[0],gT[1],gT[2],gT[3]], color:bodyLight});
+
+  // tail lights + tire hints
+  quads.push({pts:[tw(-HW+1.1,4,TAIL),tw(-3.5,4,TAIL),tw(-3.5,6,TAIL),tw(-HW+1.1,6,TAIL)], color:taillight});
+  quads.push({pts:[tw(3.5,4,TAIL),tw(HW-1.1,4,TAIL),tw(HW-1.1,6,TAIL),tw(3.5,6,TAIL)], color:taillight});
+  quads.push({pts:[tw(-HW,0,TAIL),tw(-HW+3,0,TAIL),tw(-HW+3,CB,TAIL),tw(-HW,CB,TAIL)], color:tire});
+  quads.push({pts:[tw(HW-3,0,TAIL),tw(HW,0,TAIL),tw(HW,CB,TAIL),tw(HW-3,CB,TAIL)], color:tire});
+
+  // nose: low headlights + tire hints
+  quads.push({pts:[tw(-HW*0.85+1,3,NOSE),tw(-3,3,NOSE),tw(-3,4.8,NOSE),tw(-HW*0.85+1,4.8,NOSE)], color:headlight});
+  quads.push({pts:[tw(3,3,NOSE),tw(HW*0.85-1,3,NOSE),tw(HW*0.85-1,4.8,NOSE),tw(3,4.8,NOSE)], color:headlight});
+  quads.push({pts:[tw(-HW,0,NOSE-2),tw(-HW+3,0,NOSE-2),tw(-HW+3,CB,NOSE-2),tw(-HW,CB,NOSE-2)], color:tire});
+  quads.push({pts:[tw(HW-3,0,NOSE-2),tw(HW,0,NOSE-2),tw(HW,CB,NOSE-2),tw(HW-3,CB,NOSE-2)], color:tire});
+
+  if(blinkOn && car.signal){
+    const bx = (car.signal==='left' ? -1 : 1) * (HW - 1);
+    const amber = 'rgb(255,170,20)';
+    quads.push({pts:[tw(bx-1.3,4,NOSE-2.2),tw(bx+1.3,4,NOSE-2.2),tw(bx+1.3,5.5,NOSE-2.2),tw(bx-1.3,5.5,NOSE-2.2)], color:amber});
+    quads.push({pts:[tw(bx-1.3,4,TAIL-0.4),tw(bx+1.3,4,TAIL-0.4),tw(bx+1.3,5.5,TAIL-0.4),tw(bx-1.3,5.5,TAIL-0.4)], color:amber});
+  }
+
+  return quads;
+}
+
+// A boxy delivery van — plain civilian traffic, bigger than a sedan.
+function buildVanQuads(car){
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
+
+  const rgb = carColorRGB(car.color);
+  const body = shadeColor(rgb, 1.0);
+  const bodyDark = shadeColor(rgb, 0.8);
+  const bodyLight = shadeColor(rgb, 1.15);
+  const glass = 'rgb(38,44,52)';
+  const tire = 'rgb(16,16,18)';
+  const headlight = 'rgb(255,248,222)';
+  const taillight = 'rgb(206,64,54)';
+
+  const HW = 7.8, NOSE = 16, TAIL = -16, CB = 3, CT = 15;
+  const quads = [];
+  const cB = [tw(-HW,CB,TAIL), tw(HW,CB,TAIL), tw(HW,CB,NOSE), tw(-HW,CB,NOSE)];
+  const cT = [tw(-HW,CT,TAIL), tw(HW,CT,TAIL), tw(HW,CT,NOSE), tw(-HW,CT,NOSE)];
+  quads.push({pts:[cB[0],cT[0],cT[1],cB[1]], color:bodyDark});
+  quads.push({pts:[cB[1],cT[1],cT[2],cB[2]], color:bodyLight});
+  quads.push({pts:[cB[2],cT[2],cT[3],cB[3]], color:body});
+  quads.push({pts:[cB[3],cT[3],cT[0],cB[0]], color:bodyDark});
+  quads.push({pts:[cT[0],cT[1],cT[2],cT[3]], color:bodyLight});
+
+  quads.push({pts:[tw(-HW+1.5,CT-4,NOSE-0.2),tw(HW-1.5,CT-4,NOSE-0.2),tw(HW-1.5,CT-0.5,NOSE-0.2),tw(-HW+1.5,CT-0.5,NOSE-0.2)], color:glass});
+
+  quads.push({pts:[tw(-HW+1.3,4.5,TAIL),tw(-4.5,4.5,TAIL),tw(-4.5,6.5,TAIL),tw(-HW+1.3,6.5,TAIL)], color:taillight});
+  quads.push({pts:[tw(4.5,4.5,TAIL),tw(HW-1.3,4.5,TAIL),tw(HW-1.3,6.5,TAIL),tw(4.5,6.5,TAIL)], color:taillight});
+  quads.push({pts:[tw(-HW,0,TAIL),tw(-HW+3.2,0,TAIL),tw(-HW+3.2,CB,TAIL),tw(-HW,CB,TAIL)], color:tire});
+  quads.push({pts:[tw(HW-3.2,0,TAIL),tw(HW,0,TAIL),tw(HW,CB,TAIL),tw(HW-3.2,CB,TAIL)], color:tire});
+
+  quads.push({pts:[tw(-HW+1.3,4.5,NOSE),tw(-4.5,4.5,NOSE),tw(-4.5,6.5,NOSE),tw(-HW+1.3,6.5,NOSE)], color:headlight});
+  quads.push({pts:[tw(4.5,4.5,NOSE),tw(HW-1.3,4.5,NOSE),tw(HW-1.3,6.5,NOSE),tw(4.5,6.5,NOSE)], color:headlight});
+  quads.push({pts:[tw(-HW,0,NOSE),tw(-HW+3.2,0,NOSE),tw(-HW+3.2,CB,NOSE),tw(-HW,CB,NOSE)], color:tire});
+  quads.push({pts:[tw(HW-3.2,0,NOSE),tw(HW,0,NOSE),tw(HW,CB,NOSE),tw(HW-3.2,CB,NOSE)], color:tire});
+
+  if(blinkOn && car.signal){
+    const bx = (car.signal==='left' ? -1 : 1) * (HW - 1);
+    const amber = 'rgb(255,170,20)';
+    quads.push({pts:[tw(bx-1.5,5,NOSE+0.4),tw(bx+1.5,5,NOSE+0.4),tw(bx+1.5,6.8,NOSE+0.4),tw(bx-1.5,6.8,NOSE+0.4)], color:amber});
+    quads.push({pts:[tw(bx-1.5,5,TAIL-0.4),tw(bx+1.5,5,TAIL-0.4),tw(bx+1.5,6.8,TAIL-0.4),tw(bx-1.5,6.8,TAIL-0.4)], color:amber});
+  }
+
+  return quads;
+}
+
 // A narrow bike + rider silhouette — much slimmer and shorter than a car,
 // so it reads as something quick and easy to miss in traffic.
 function buildMotorbikeQuads(car){
@@ -1095,6 +1348,51 @@ function buildMotorbikeQuads(car){
     const amber = 'rgb(255,170,20)';
     quads.push({pts:[tw(bx-0.9,3.2,NOSE+0.3),tw(bx+0.9,3.2,NOSE+0.3),tw(bx+0.9,4.5,NOSE+0.3),tw(bx-0.9,4.5,NOSE+0.3)], color:amber});
   }
+
+  return quads;
+}
+
+// A small e-bike: narrower and slower than the motorbike, an upright
+// rider instead of a crouched one, and a front basket instead of lights
+// you'd mistake for a motorbike's.
+function buildEbikeQuads(car){
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
+
+  const rgb = carColorRGB(car.color);
+  const body = shadeColor(rgb, 1.0);
+  const bodyDark = shadeColor(rgb, 0.75);
+  const tire = 'rgb(14,14,16)';
+  const headlight = 'rgb(255,248,222)';
+  const taillight = 'rgb(206,64,54)';
+
+  const HW = 1.4, NOSE = 8, TAIL = -8, CB = 1.5, CT = 5;
+  const quads = [];
+  const cB = [tw(-HW,CB,TAIL), tw(HW,CB,TAIL), tw(HW,CB,NOSE), tw(-HW,CB,NOSE)];
+  const cT = [tw(-HW,CT,TAIL), tw(HW,CT,TAIL), tw(HW,CT,NOSE), tw(-HW,CT,NOSE)];
+  quads.push({pts:[cB[0],cT[0],cT[1],cB[1]], color:bodyDark});
+  quads.push({pts:[cB[1],cT[1],cT[2],cB[2]], color:body});
+  quads.push({pts:[cB[2],cT[2],cT[3],cB[3]], color:body});
+  quads.push({pts:[cB[3],cT[3],cT[0],cB[0]], color:bodyDark});
+  quads.push({pts:[cT[0],cT[1],cT[2],cT[3]], color:body});
+
+  // upright rider torso + head
+  const RW = 1.3, R_T = -2, R_N = 1, RT2 = 19;
+  const rB = [tw(-RW,CT,R_T), tw(RW,CT,R_T), tw(RW,CT,R_N), tw(-RW,CT,R_N)];
+  const rT = [tw(-RW*0.6,RT2,R_T+0.8), tw(RW*0.6,RT2,R_T+0.8), tw(RW*0.6,RT2,R_N-0.8), tw(-RW*0.6,RT2,R_N-0.8)];
+  quads.push({pts:[rB[0],rT[0],rT[1],rB[1]], color:'rgb(55,78,88)'});
+  quads.push({pts:[rB[1],rT[1],rT[2],rB[2]], color:'rgb(65,90,100)'});
+  quads.push({pts:[rB[2],rT[2],rT[3],rB[3]], color:'rgb(55,78,88)'});
+  quads.push({pts:[rB[3],rT[3],rT[0],rB[0]], color:'rgb(65,90,100)'});
+  quads.push({pts:[rT[0],rT[1],rT[2],rT[3]], color:'rgb(70,50,45)'});
+
+  // front basket
+  quads.push({pts:[tw(-1.8,CT,NOSE-1),tw(1.8,CT,NOSE-1),tw(1.8,CT+2.2,NOSE-1),tw(-1.8,CT+2.2,NOSE-1)], color:'rgb(120,100,70)'});
+
+  quads.push({pts:[tw(-0.9,2.5,TAIL),tw(0.9,2.5,TAIL),tw(0.9,3.6,TAIL),tw(-0.9,3.6,TAIL)], color:taillight});
+  quads.push({pts:[tw(-0.9,2.5,NOSE),tw(0.9,2.5,NOSE),tw(0.9,3.6,NOSE),tw(-0.9,3.6,NOSE)], color:headlight});
+  quads.push({pts:[tw(-HW,0,TAIL),tw(HW,0,TAIL),tw(HW,CB,TAIL),tw(-HW,CB,TAIL)], color:tire});
+  quads.push({pts:[tw(-HW,0,NOSE),tw(HW,0,NOSE),tw(HW,CB,NOSE),tw(-HW,CB,NOSE)], color:tire});
 
   return quads;
 }
@@ -1255,6 +1553,9 @@ function drawMinimap(){
     mctx.arc(ox+car.x*scale, oz+car.z*scale, r, 0, Math.PI*2);
     mctx.fill();
   }
+  for(const v of civilians) dot(v, '#9aa09a', 2.0);
+  for(const v of vans) dot(v, '#9aa08f', 2.2);
+  for(const v of ebikes) dot(v, '#6fa070', 1.6);
   for(const p of police) dot(p, '#6fa8ff', 2.4);
   for(const a of ambulances) dot(a, '#f0f0e6', 2.4);
   for(const m of motorbikes) dot(m, '#ff6a3d', 1.8);
@@ -1295,10 +1596,13 @@ function frame(t){
 // initial static city behind the start screen
 generateCity(1);
 player = spawnPlayerStart();
-suspect = spawnStreetCar('#e8b23a', 120);
-police = [spawnStreetCar('#6fa8ff', 90)];
+suspect = spawnStreetCar('#e8b23a', 120, 'sports');
+police = [spawnStreetCar('#6fa8ff', 90, 'police')];
 ambulances = [spawnStreetCar('#f0f0e6', 85, 'ambulance')];
 motorbikes = [spawnStreetCar('#ff6a3d', 180, 'motorbike')];
+vans = [spawnStreetCar('#9aa08f', 80, 'van')];
+ebikes = [spawnStreetCar('#6fa070', 60, 'ebike')];
+civilians = [spawnStreetCar(CIVILIAN_COLORS[0], 110)];
 score = 0; caught = 0; timeLeft = START_TIME; fuel = START_FUEL;
 gameState = 'start';
 requestAnimationFrame(frame);
