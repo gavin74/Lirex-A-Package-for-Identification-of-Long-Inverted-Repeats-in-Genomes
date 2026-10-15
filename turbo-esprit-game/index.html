@@ -134,13 +134,17 @@
           Drive the grey city grid and run down the amber
           <b>suspect car</b> before your fuel or the clock runs out.
           Get close at speed to make the bust. Clip a building and
-          you'll stall; clip a <b style="color:#6fa8ff">police car</b>
-          and you'll lose time. Cross a pale <b>fuel pad</b> to refill.
+          you'll stall; clip a <b style="color:#6fa8ff">police car</b>,
+          an <b style="color:#f0f0e6">ambulance</b> or a fast
+          <b style="color:#ff6a3d">motorbike</b> and you'll lose time.
+          Cross a pale <b>fuel pad</b> to refill.
         </p>
         <p>
           <span class="keys">&uarr; / W</span> accelerate&nbsp;&nbsp;
           <span class="keys">&darr; / S</span> brake / reverse<br>
-          <span class="keys">&larr; &rarr; / A D</span> steer&nbsp;&nbsp;
+          <span class="keys">&larr; &rarr; / A D</span> change lane —
+          tap it near a junction to turn instead<br>
+          <span class="keys">M</span> mute&nbsp;&nbsp;
           <span class="keys">R</span> restart
         </p>
         <div class="go" id="btnStart">PRESS ENTER OR CLICK TO DRIVE</div>
@@ -169,6 +173,10 @@ const CATCH_RADIUS = 22;
 const START_TIME = 95;
 const CATCH_BONUS_TIME = 16;
 const START_FUEL = 100;
+const LANE_OFFSET = 16;            // distance of each lane from the street centerline
+const LANE_SPEED = 70;             // lateral units/sec when changing lanes
+const TURN_RATE = 6;               // rad/sec the player's visual heading animates at
+const JUNCTION_WINDOW = 30;        // how close to a crossing a turn can be started
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -250,11 +258,49 @@ function nearestStreet(list, v){
 // Entities
 // ---------------------------------------------------------------
 function makeCar(x,z,heading,color,maxSpeed){
-  return {x,z,heading,speed:0,color,maxSpeed,
-           axis:'z', dir:1, turnCooldown:0, alive:true};
+  return {x,z,heading,targetHeading:heading,speed:0,color,maxSpeed,type:'car',
+           axis:'z', dir:1, turnCooldown:0, alive:true,
+           lane:0, laneOffset:0, streetCoord:0,
+           signal:null, signalTimer:0};
 }
 
-let player, suspect, police, particles;
+// Driving directions as a 4-state cycle (compass convention: heading 0 =
+// +z/north, increasing clockwise) — turning right/left just steps forward
+// or backward through this cycle.
+const CARDINALS = [ {axis:'z',dir:1}, {axis:'x',dir:1}, {axis:'z',dir:-1}, {axis:'x',dir:-1} ];
+function cardinalHeading(axis,dir){
+  return axis==='z' ? (dir>0?0:Math.PI) : (dir>0?Math.PI/2:-Math.PI/2);
+}
+function cardinalIndex(axis,dir){
+  return CARDINALS.findIndex(c=>c.axis===axis && c.dir===dir);
+}
+
+function setSignal(car, side, duration){
+  car.signal = side;
+  car.signalTimer = duration;
+}
+
+// animates car.heading toward car.targetHeading at a fixed angular rate,
+// always taking the shorter way around
+function approachHeading(car, dt, rate){
+  let delta = car.targetHeading - car.heading;
+  while(delta > Math.PI) delta -= Math.PI*2;
+  while(delta < -Math.PI) delta += Math.PI*2;
+  const maxStep = rate*dt;
+  if(Math.abs(delta) <= maxStep) car.heading = car.targetHeading;
+  else car.heading += Math.sign(delta)*maxStep;
+}
+
+let blinkOn = true, blinkClock = 0;
+let fastBlinkOn = true, fastBlinkClock = 0;
+function updateBlink(dt){
+  blinkClock -= dt;
+  if(blinkClock <= 0){ blinkOn = !blinkOn; blinkClock = 0.32; }
+  fastBlinkClock -= dt;
+  if(fastBlinkClock <= 0){ fastBlinkOn = !fastBlinkOn; fastBlinkClock = 0.15; }
+}
+
+let player, suspect, police, ambulances, motorbikes, particles;
 let score, caught, timeLeft, fuel, gameState, roundLevel;
 let lastSuspectSpawnGuardTimer = 0;
 let bannerTimer = 0;
@@ -265,6 +311,8 @@ function spawnPlayerStart(){
   const z = nearestStreet(streetLinesZ, -worldHalfZ+150);
   const car = makeCar(x, z, 0, '#e8e8e8', 220);
   car.crashCooldown = 0;
+  car.streetCoord = x;
+  car.lane = 1;
   return car;
 }
 
@@ -279,6 +327,14 @@ function resetGame(){
   for(let i=0;i<3;i++){
     police.push(spawnStreetCar('#6fa8ff', 95));
   }
+  ambulances = [];
+  for(let i=0;i<2;i++){
+    ambulances.push(spawnStreetCar('#f0f0e6', 85, 'ambulance'));
+  }
+  motorbikes = [];
+  for(let i=0;i<3;i++){
+    motorbikes.push(spawnStreetCar('#ff6a3d', 180, 'motorbike'));
+  }
   spawnSuspect();
   gameState = 'playing';
   showBanner('GO!', 1.2);
@@ -290,12 +346,15 @@ function randomStreetPoint(){
   return {x,z};
 }
 
-function spawnStreetCar(color, speed){
+function spawnStreetCar(color, speed, type){
   const p = randomStreetPoint();
   const c = makeCar(p.x, p.z, Math.random()<0.5?0:Math.PI, color, speed);
+  c.speed = speed;  // AI traffic cruises at a constant speed, no accelerating
+  c.type = type || 'car';
   c.axis = Math.random()<0.5 ? 'x' : 'z';
   c.dir = Math.random()<0.5 ? 1 : -1;
-  c.heading = c.axis==='z' ? (c.dir>0?0:Math.PI) : (c.dir>0?Math.PI/2:-Math.PI/2);
+  c.heading = cardinalHeading(c.axis, c.dir);
+  c.targetHeading = c.heading;
   return c;
 }
 
@@ -317,11 +376,14 @@ function dist2(x1,z1,x2,z2){ const dx=x1-x2, dz=z1-z2; return dx*dx+dz*dz; }
 // ---------------------------------------------------------------
 const keys = {};
 window.addEventListener('keydown', e=>{
-  keys[e.key.toLowerCase()] = true;
+  const k = e.key.toLowerCase();
+  keys[k] = true;
   if(e.key==='Enter' && gameState==='start') startGame();
   if((e.key==='r'||e.key==='R') && (gameState==='over'||gameState==='playing')) resetGame();
   if(e.key==='m'||e.key==='M') toggleMute();
-  if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase())) e.preventDefault();
+  if((k==='arrowleft'||k==='a') && !e.repeat) handleSteer('left');
+  if((k==='arrowright'||k==='d') && !e.repeat) handleSteer('right');
+  if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k)) e.preventDefault();
 });
 window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
 
@@ -435,11 +497,36 @@ document.getElementById('hudSound').addEventListener('click', toggleMute);
 // ---------------------------------------------------------------
 // Physics / AI update
 // ---------------------------------------------------------------
+
+// Turbo Esprit didn't let you freely swing the wheel mid-block — left/right
+// shifted you a lane over, and you only actually turned a corner near a
+// junction. Steering here is edge-triggered (one action per key press) so
+// it reads the same way: a tap away from a junction queues a lane change,
+// a tap near one commits to the turn.
+function handleSteer(side){
+  if(gameState!=='playing' || !player) return;
+  const forward = player.axis==='z' ? player.z : player.x;
+  const lines = player.axis==='z' ? streetLinesZ : streetLinesX;
+  const nearJunction = lines.some(line => Math.abs(forward-line) < JUNCTION_WINDOW);
+  if(nearJunction) turnPlayer(side);
+  else player.lane = side==='left' ? -1 : 1;
+  setSignal(player, side, 1.0);
+}
+
+function turnPlayer(side){
+  const idx = cardinalIndex(player.axis, player.dir);
+  const next = CARDINALS[side==='right' ? (idx+1)%4 : (idx+3)%4];
+  const lines = player.axis==='z' ? streetLinesZ : streetLinesX;
+  const forward = player.axis==='z' ? player.z : player.x;
+  player.streetCoord = nearestStreet(lines, forward);
+  player.axis = next.axis;
+  player.dir = next.dir;
+  player.targetHeading = cardinalHeading(next.axis, next.dir);
+}
+
 function updatePlayer(dt){
   const accel = keys['arrowup']||keys['w'];
   const brake = keys['arrowdown']||keys['s'];
-  const left  = keys['arrowleft']||keys['a'];
-  const right = keys['arrowright']||keys['d'];
 
   if(accel) player.speed += 150*dt;
   else if(brake) player.speed -= 220*dt;
@@ -448,12 +535,20 @@ function updatePlayer(dt){
   player.speed = clamp(player.speed, -90, player.maxSpeed);
   if(Math.abs(player.speed) < 2 && !accel && !brake) player.speed = 0;
 
-  const steerAmt = 0.85 * dt * clamp(Math.abs(player.speed)/80, 0.3, 1.0) * Math.sign(player.speed||1);
-  if(left)  player.heading -= steerAmt;
-  if(right) player.heading += steerAmt;
+  approachHeading(player, dt, TURN_RATE);
 
-  const nx = player.x + Math.sin(player.heading)*player.speed*dt;
-  const nz = player.z + Math.cos(player.heading)*player.speed*dt;
+  // slide toward the target lane at a fixed rate, then drive straight
+  // down the current street at that lane offset
+  const targetOffset = player.lane * LANE_OFFSET;
+  const maxSlide = LANE_SPEED*dt;
+  if(Math.abs(targetOffset-player.laneOffset) <= maxSlide) player.laneOffset = targetOffset;
+  else player.laneOffset += Math.sign(targetOffset-player.laneOffset)*maxSlide;
+
+  const fixedCoord = player.streetCoord + player.laneOffset;
+  let nx, nz;
+  if(player.axis==='z'){ nz = player.z + player.dir*player.speed*dt; nx = fixedCoord; }
+  else { nx = player.x + player.dir*player.speed*dt; nz = fixedCoord; }
+
   const CAR_R = 9;
 
   // axis-separated collision so the car slides along walls instead of
@@ -499,9 +594,8 @@ function collideBuildings(x, z, r){
 }
 
 function updateStreetCar(car, dt){
-  const nx = car.x + Math.sin(car.heading)*car.speed*dt;
-  const nz = car.z + Math.cos(car.heading)*car.speed*dt;
-  car.x = nx; car.z = nz;
+  if(car.axis==='z') car.z += car.dir*car.speed*dt;
+  else car.x += car.dir*car.speed*dt;
 
   car.turnCooldown -= dt;
   const moving = car.axis==='z' ? car.z : car.x;
@@ -509,13 +603,15 @@ function updateStreetCar(car, dt){
   for(const line of lines){
     if(Math.abs(moving-line) < 4 && car.turnCooldown<=0){
       car.turnCooldown = 1.0;
-      const r = Math.random();
-      if(r < 0.55){
-        // continue straight
-      } else {
-        car.axis = car.axis==='z' ? 'x' : 'z';
-        car.dir = Math.random()<0.5?1:-1;
-        car.heading = car.axis==='z' ? (car.dir>0?0:Math.PI) : (car.dir>0?Math.PI/2:-Math.PI/2);
+      if(Math.random() >= 0.55){
+        const idx = cardinalIndex(car.axis, car.dir);
+        const goRight = Math.random() < 0.5;
+        const next = CARDINALS[goRight ? (idx+1)%4 : (idx+3)%4];
+        car.axis = next.axis;
+        car.dir = next.dir;
+        car.heading = cardinalHeading(next.axis, next.dir);
+        car.targetHeading = car.heading;
+        setSignal(car, goRight ? 'right' : 'left', 1.0);
       }
       break;
     }
@@ -526,18 +622,37 @@ function updateStreetCar(car, dt){
 
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
+function allTraffic(){ return [...police, ...ambulances, ...motorbikes]; }
+function allCars(){ return [player, suspect, ...allTraffic()]; }
+
+// getting too close to any moving traffic costs time and speed — a bigger
+// hit for an ambulance you shouldn't be cutting off, a smaller one for a
+// bike that was probably weaving around you anyway
+const HAZARDS = [
+  {list: () => police,      label: 'POLICE',    penalty: 4},
+  {list: () => ambulances,  label: 'AMBULANCE', penalty: 6},
+  {list: () => motorbikes,  label: 'BIKE',      penalty: 2},
+];
+
 function update(dt){
   if(gameState !== 'playing') return;
 
+  updateBlink(dt);
   updatePlayer(dt);
   updateStreetCar(suspect, dt);
-  for(const p of police) updateStreetCar(p, dt);
+  for(const car of allTraffic()) updateStreetCar(car, dt);
 
-  for(const p of police){
-    if(dist2(player.x,player.z,p.x,p.z) < 26*26){
-      timeLeft -= 4;
-      player.speed *= 0.3;
-      showBanner('POLICE! -4s', 0.9);
+  for(const car of allCars()){
+    if(car.signal && (car.signalTimer -= dt) <= 0) car.signal = null;
+  }
+
+  for(const hz of HAZARDS){
+    for(const car of hz.list()){
+      if(dist2(player.x,player.z,car.x,car.z) < 26*26){
+        timeLeft -= hz.penalty;
+        player.speed *= 0.3;
+        showBanner(hz.label+'! -'+hz.penalty+'s', 0.9);
+      }
     }
   }
 
@@ -683,6 +798,12 @@ function carColorRGB(hex){
   return [(n>>16)&255, (n>>8)&255, n&255];
 }
 
+function buildVehicleQuads(car){
+  if(car.type === 'motorbike') return buildMotorbikeQuads(car);
+  if(car.type === 'ambulance') return buildAmbulanceQuads(car);
+  return buildCarQuads(car);
+}
+
 // A small low-poly car: a chassis slab, a cabin/greenhouse with tinted
 // glass, headlight/taillight accents and tire hints at the corners.
 // Local car space: lz+ = nose (direction of travel), lx+ = right, ly = up.
@@ -734,6 +855,124 @@ function buildCarQuads(car){
   quads.push({pts:[tw(4,4.5,NOSE),tw(HW-1.2,4.5,NOSE),tw(HW-1.2,6.5,NOSE),tw(4,6.5,NOSE)], color:headlight});
   quads.push({pts:[tw(-HW,0,NOSE),tw(-HW+3,0,NOSE),tw(-HW+3,CB,NOSE),tw(-HW,CB,NOSE)], color:tire});
   quads.push({pts:[tw(HW-3,0,NOSE),tw(HW,0,NOSE),tw(HW,CB,NOSE),tw(HW-3,CB,NOSE)], color:tire});
+
+  // blinker: a corner marker lamp, flashing on the side that's signaling
+  if(blinkOn && car.signal){
+    const bx = (car.signal==='left' ? -1 : 1) * (HW - 0.8);
+    const amber = 'rgb(255,170,20)';
+    quads.push({pts:[tw(bx-1.4,5,NOSE+0.4),tw(bx+1.4,5,NOSE+0.4),tw(bx+1.4,6.6,NOSE+0.4),tw(bx-1.4,6.6,NOSE+0.4)], color:amber});
+    quads.push({pts:[tw(bx-1.4,5,TAIL-0.4),tw(bx+1.4,5,TAIL-0.4),tw(bx+1.4,6.6,TAIL-0.4),tw(bx-1.4,6.6,TAIL-0.4)], color:amber});
+  }
+
+  return quads;
+}
+
+// A narrow bike + rider silhouette — much slimmer and shorter than a car,
+// so it reads as something quick and easy to miss in traffic.
+function buildMotorbikeQuads(car){
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
+
+  const rgb = carColorRGB(car.color);
+  const body = shadeColor(rgb, 1.0);
+  const bodyDark = shadeColor(rgb, 0.75);
+  const tire = 'rgb(14,14,16)';
+  const headlight = 'rgb(255,248,222)';
+  const taillight = 'rgb(206,64,54)';
+
+  const HW = 2.0, NOSE = 11, TAIL = -11, CB = 2, CT = 7;
+  const quads = [];
+
+  const cB = [tw(-HW,CB,TAIL), tw(HW,CB,TAIL), tw(HW,CB,NOSE), tw(-HW,CB,NOSE)];
+  const cT = [tw(-HW,CT,TAIL), tw(HW,CT,TAIL), tw(HW,CT,NOSE), tw(-HW,CT,NOSE)];
+  quads.push({pts:[cB[0],cT[0],cT[1],cB[1]], color:bodyDark});
+  quads.push({pts:[cB[1],cT[1],cT[2],cB[2]], color:body});
+  quads.push({pts:[cB[2],cT[2],cT[3],cB[3]], color:body});
+  quads.push({pts:[cB[3],cT[3],cT[0],cB[0]], color:bodyDark});
+  quads.push({pts:[cT[0],cT[1],cT[2],cT[3]], color:body});
+
+  // rider torso + helmet
+  const RW = 1.5, R_T = -1, R_N = 3, RT2 = 16;
+  const rB = [tw(-RW,CT,R_T), tw(RW,CT,R_T), tw(RW,CT,R_N), tw(-RW,CT,R_N)];
+  const rT = [tw(-RW*0.7,RT2,R_T+0.5), tw(RW*0.7,RT2,R_T+0.5), tw(RW*0.7,RT2,R_N-0.5), tw(-RW*0.7,RT2,R_N-0.5)];
+  quads.push({pts:[rB[0],rT[0],rT[1],rB[1]], color:'rgb(30,32,36)'});
+  quads.push({pts:[rB[1],rT[1],rT[2],rB[2]], color:'rgb(44,46,52)'});
+  quads.push({pts:[rB[2],rT[2],rT[3],rB[3]], color:'rgb(30,32,36)'});
+  quads.push({pts:[rB[3],rT[3],rT[0],rB[0]], color:'rgb(44,46,52)'});
+  quads.push({pts:[rT[0],rT[1],rT[2],rT[3]], color:'rgb(54,56,62)'});
+
+  quads.push({pts:[tw(-1.2,3,TAIL),tw(1.2,3,TAIL),tw(1.2,4.6,TAIL),tw(-1.2,4.6,TAIL)], color:taillight});
+  quads.push({pts:[tw(-1.2,3,NOSE),tw(1.2,3,NOSE),tw(1.2,4.6,NOSE),tw(-1.2,4.6,NOSE)], color:headlight});
+  quads.push({pts:[tw(-HW,0,TAIL),tw(HW,0,TAIL),tw(HW,CB,TAIL),tw(-HW,CB,TAIL)], color:tire});
+  quads.push({pts:[tw(-HW,0,NOSE),tw(HW,0,NOSE),tw(HW,CB,NOSE),tw(-HW,CB,NOSE)], color:tire});
+
+  if(blinkOn && car.signal){
+    const bx = (car.signal==='left' ? -1 : 1) * (HW - 0.2);
+    const amber = 'rgb(255,170,20)';
+    quads.push({pts:[tw(bx-0.9,3.2,NOSE+0.3),tw(bx+0.9,3.2,NOSE+0.3),tw(bx+0.9,4.5,NOSE+0.3),tw(bx-0.9,4.5,NOSE+0.3)], color:amber});
+  }
+
+  return quads;
+}
+
+// A boxy van with a red accent stripe, windshield, and a roof light bar
+// that strobes red/blue on a faster clock than the turn signals.
+function buildAmbulanceQuads(car){
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
+
+  const white = 'rgb(232,232,226)';
+  const whiteDark = 'rgb(186,186,182)';
+  const whiteLight = 'rgb(248,248,245)';
+  const red = 'rgb(198,42,36)';
+  const glass = 'rgb(38,44,52)';
+  const tire = 'rgb(16,16,18)';
+  const headlight = 'rgb(255,248,222)';
+  const taillight = 'rgb(206,64,54)';
+
+  const HW = 8.5, NOSE = 19, TAIL = -19, CB = 3, CT = 17;
+  const quads = [];
+
+  const cB = [tw(-HW,CB,TAIL), tw(HW,CB,TAIL), tw(HW,CB,NOSE), tw(-HW,CB,NOSE)];
+  const cT = [tw(-HW,CT,TAIL), tw(HW,CT,TAIL), tw(HW,CT,NOSE), tw(-HW,CT,NOSE)];
+  quads.push({pts:[cB[0],cT[0],cT[1],cB[1]], color:whiteDark});
+  quads.push({pts:[cB[1],cT[1],cT[2],cB[2]], color:whiteLight});
+  quads.push({pts:[cB[2],cT[2],cT[3],cB[3]], color:white});
+  quads.push({pts:[cB[3],cT[3],cT[0],cB[0]], color:whiteDark});
+  quads.push({pts:[cT[0],cT[1],cT[2],cT[3]], color:whiteLight});
+
+  // red accent stripe along both flanks
+  quads.push({pts:[tw(HW,8,TAIL+3),tw(HW,8,NOSE-3),tw(HW,11,NOSE-3),tw(HW,11,TAIL+3)], color:red});
+  quads.push({pts:[tw(-HW,8,NOSE-3),tw(-HW,8,TAIL+3),tw(-HW,11,TAIL+3),tw(-HW,11,NOSE-3)], color:red});
+
+  // windshield
+  quads.push({pts:[tw(-HW+1.5,CT-5,NOSE-0.2),tw(HW-1.5,CT-5,NOSE-0.2),tw(HW-1.5,CT-0.5,NOSE-0.2),tw(-HW+1.5,CT-0.5,NOSE-0.2)], color:glass});
+
+  // tail: lights + tire hints
+  quads.push({pts:[tw(-HW+1.5,5,TAIL),tw(-5,5,TAIL),tw(-5,7.5,TAIL),tw(-HW+1.5,7.5,TAIL)], color:taillight});
+  quads.push({pts:[tw(5,5,TAIL),tw(HW-1.5,5,TAIL),tw(HW-1.5,7.5,TAIL),tw(5,7.5,TAIL)], color:taillight});
+  quads.push({pts:[tw(-HW,0,TAIL),tw(-HW+3.5,0,TAIL),tw(-HW+3.5,CB,TAIL),tw(-HW,CB,TAIL)], color:tire});
+  quads.push({pts:[tw(HW-3.5,0,TAIL),tw(HW,0,TAIL),tw(HW,CB,TAIL),tw(HW-3.5,CB,TAIL)], color:tire});
+
+  // nose: headlights + tire hints
+  quads.push({pts:[tw(-HW+1.5,5,NOSE),tw(-5,5,NOSE),tw(-5,7.5,NOSE),tw(-HW+1.5,7.5,NOSE)], color:headlight});
+  quads.push({pts:[tw(5,5,NOSE),tw(HW-1.5,5,NOSE),tw(HW-1.5,7.5,NOSE),tw(5,7.5,NOSE)], color:headlight});
+  quads.push({pts:[tw(-HW,0,NOSE),tw(-HW+3.5,0,NOSE),tw(-HW+3.5,CB,NOSE),tw(-HW,CB,NOSE)], color:tire});
+  quads.push({pts:[tw(HW-3.5,0,NOSE),tw(HW,0,NOSE),tw(HW,CB,NOSE),tw(HW-3.5,CB,NOSE)], color:tire});
+
+  // roof light bar: strobes red/blue on the fast clock, independent of turn signals
+  const barY0 = CT, barY1 = CT+3;
+  const redLamp = fastBlinkOn ? 'rgb(255,40,30)' : 'rgb(90,10,10)';
+  const blueLamp = fastBlinkOn ? 'rgb(20,40,110)' : 'rgb(60,90,255)';
+  quads.push({pts:[tw(-5,barY0,-2),tw(0,barY0,-2),tw(0,barY1,-2),tw(-5,barY1,-2)], color:redLamp});
+  quads.push({pts:[tw(0,barY0,-2),tw(5,barY0,-2),tw(5,barY1,-2),tw(0,barY1,-2)], color:blueLamp});
+
+  if(blinkOn && car.signal){
+    const bx = (car.signal==='left' ? -1 : 1) * (HW - 1);
+    const amber = 'rgb(255,170,20)';
+    quads.push({pts:[tw(bx-1.6,5,NOSE+0.4),tw(bx+1.6,5,NOSE+0.4),tw(bx+1.6,6.8,NOSE+0.4),tw(bx-1.6,6.8,NOSE+0.4)], color:amber});
+    quads.push({pts:[tw(bx-1.6,5,TAIL-0.4),tw(bx+1.6,5,TAIL-0.4),tw(bx+1.6,6.8,TAIL-0.4),tw(bx-1.6,6.8,TAIL-0.4)], color:amber});
+  }
 
   return quads;
 }
@@ -789,10 +1028,9 @@ function drawScene(){
     if(d > RENDER_DIST*RENDER_DIST) continue;
     drawables.push({depth:d, faces: buildingFaces(b, cam)});
   }
-  const allCars = [player, suspect, ...police];
-  for(const car of allCars){
+  for(const car of allCars()){
     const d = dist2(cam.x,cam.z,car.x,car.z);
-    drawables.push({depth:d, faces:buildCarQuads(car), isCar:true});
+    drawables.push({depth:d, faces:buildVehicleQuads(car), isCar:true});
   }
 
   drawables.sort((a,b)=>b.depth - a.depth);
@@ -827,6 +1065,8 @@ function drawMinimap(){
     mctx.fill();
   }
   for(const p of police) dot(p, '#6fa8ff', 2.4);
+  for(const a of ambulances) dot(a, '#f0f0e6', 2.4);
+  for(const m of motorbikes) dot(m, '#ff6a3d', 1.8);
   if(suspect) dot(suspect, '#e8b23a', 2.6);
   dot(player, '#ffffff', 3);
 }
@@ -864,6 +1104,8 @@ generateCity(1);
 player = spawnPlayerStart();
 suspect = spawnStreetCar('#e8b23a', 120);
 police = [spawnStreetCar('#6fa8ff', 90)];
+ambulances = [spawnStreetCar('#f0f0e6', 85, 'ambulance')];
+motorbikes = [spawnStreetCar('#ff6a3d', 180, 'motorbike')];
 score = 0; caught = 0; timeLeft = START_TIME; fuel = START_FUEL;
 gameState = 'start';
 requestAnimationFrame(frame);
