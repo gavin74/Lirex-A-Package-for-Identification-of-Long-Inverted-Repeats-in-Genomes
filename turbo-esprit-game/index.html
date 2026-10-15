@@ -198,7 +198,21 @@ const ROUNDABOUTS_ENABLED = true;  // experimental, flag-gated per request — a
 const ROAD_HALF = (BLOCK - BUILD_HALF*2) / 2; // half-width of the drivable gap between buildings
 const TL_CYCLE = 7, TL_AMBER = 1.2, TL_GAP = 1.0; // traffic-light phase timing (seconds)
 const TL_STOP_WINDOW = 26;         // how far ahead of a red/amber light traffic stops
-const SIGN_TYPES = ['stop','give_way','speed','direction','neon','neon'];
+const SIGN_TYPES = ['stop','give_way','speed','direction'];
+const BILLBOARD_SLOGANS = [
+  "DON'T PANIC",
+  'SYNERGIZE YOUR CLOUD TODAY',
+  'BLOCKCHAIN YOUR BREAKFAST',
+  'AI-POWERED SOCKS. ASK HOW',
+  'DISRUPT YOUR OWN DISRUPTION',
+  'NOW WITH 50% MORE DATA',
+  'THINK OUTSIDE THE INSIDE',
+  'QUANTUM TOASTERS INC.',
+  'YOUR FUTURE, NOW SUBSCRIBED',
+  'quantum leap into my DMs',
+  'quietly reinventing the wheel',
+  'quietly reinventing the spoon'
+];
 const DRIVE_SIDE = 'right';        // 'right' (US-style, default) or 'left' (UK-style) —
                                     // flips which lane counts as "correct" after a turn
 const DAY_LENGTH = 150;            // seconds for a full day/night cycle — keeps advancing
@@ -245,6 +259,8 @@ let roadworks = [];    // {x1,x2,z1,z2,cones,signX,signZ} — collidable lane cl
 let sidewalkBeats = []; // {x,z,axis,hasDog} — where pedestrians/dogs walk the curb
 let sidewalks = [];    // {x1,x2,z1,z2} flat pavement strips along every curb
 let levelCrossing = {x:0, z:0}; // a single rail crossing on one street
+let oneWayStreets = []; // {axis, line, dir} — the four perimeter streets, one-way round a loop
+let billboards = []; // {x,z,facing,slogan} — massive, freestanding, mounted on the perimeter wall
 let streetLinesX = [];
 let streetLinesZ = [];
 let worldTime = 0;     // elapsed play time, drives party-building light cycles
@@ -477,6 +493,51 @@ function generateCity(seed){
 
   // a single rail crossing on one street, out toward the edge of town
   levelCrossing = {x: streetLinesX[4], z: streetLinesZ[8]};
+
+  // the four perimeter streets (the ones that only have buildings on one
+  // side, with the wall on the other) are one-way, running as a loop
+  // around the city rather than full two-way streets
+  oneWayStreets = [
+    {axis:'z', line: streetLinesX[0], dir:-1},
+    {axis:'z', line: streetLinesX[BLOCKS_X], dir:1},
+    {axis:'x', line: streetLinesZ[0], dir:1},
+    {axis:'x', line: streetLinesZ[BLOCKS_Z], dir:-1}
+  ];
+
+  // massive, nonsensical billboards mounted on the perimeter wall, well
+  // clear of every building — the earlier roadside "neon sign" version
+  // sat close enough to building corners to visibly clip into them
+  billboards = [];
+  const bbRnd = mulberry32(seed + 2024);
+  const bbOffset = WALL_THICK + 10;
+  const wallSides = [
+    {fixedAxis:'x', fixedVal: -worldHalfX+bbOffset, rangeMax: worldHalfZ, facing: Math.PI/2},
+    {fixedAxis:'x', fixedVal: worldHalfX-bbOffset, rangeMax: worldHalfZ, facing: -Math.PI/2},
+    {fixedAxis:'z', fixedVal: -worldHalfZ+bbOffset, rangeMax: worldHalfX, facing: 0},
+    {fixedAxis:'z', fixedVal: worldHalfZ-bbOffset, rangeMax: worldHalfX, facing: Math.PI}
+  ];
+  for(const side of wallSides){
+    for(let k=0;k<2;k++){
+      const along = (bbRnd()*1.4-0.7) * side.rangeMax;
+      const slogan = BILLBOARD_SLOGANS[Math.floor(bbRnd()*BILLBOARD_SLOGANS.length)];
+      const pos = side.fixedAxis==='x' ? {x: side.fixedVal, z: along} : {x: along, z: side.fixedVal};
+      billboards.push({x: pos.x, z: pos.z, facing: side.facing, slogan});
+    }
+  }
+}
+
+// null if `line` isn't a one-way street for this axis, else the one
+// allowed direction
+function oneWayDir(axis, line){
+  // a wide tolerance on purpose: the world-boundary clamp (±10 for AI,
+  // ±20 for the player) keeps every car's cross coordinate on a
+  // perimeter street a good way short of the exact line value these are
+  // stored at, and a car's own lane offset pushes it further still —
+  // with streets 220 apart there's no risk of this matching the wrong one
+  for(const ow of oneWayStreets){
+    if(ow.axis===axis && Math.abs(ow.line-line) < 30) return ow.dir;
+  }
+  return null;
 }
 
 function mulberry32(a){
@@ -572,6 +633,8 @@ function resetGame(){
   roundLevel = 0;
   worldTime = 0;
   bullets = [];
+  wantedTimer = 0;
+  player.violateCooldown = 0;
   suspect = null;
   police = [];
   for(let i=0;i<3;i++){
@@ -627,6 +690,8 @@ function spawnStreetCar(color, speed, type){
   c.type = type || 'car';
   c.axis = Math.random()<0.5 ? 'x' : 'z';
   c.dir = Math.random()<0.5 ? 1 : -1;
+  const forcedDir = oneWayDir(c.axis, c.axis==='z' ? p.x : p.z);
+  if(forcedDir !== null) c.dir = forcedDir;
   c.heading = cardinalHeading(c.axis, c.dir);
   c.targetHeading = c.heading;
   snapToLane(c, p.x, p.z);
@@ -1351,18 +1416,33 @@ function updateStreetCar(car, dt){
     if(Math.abs(moving-line) < 4 && car.turnCooldown<=0){
       car.turnCooldown = 1.0;
       const idx = cardinalIndex(car.axis, car.dir);
-      if(car.fleeing){
+      // never choose a direction that would run a one-way street the
+      // wrong way. `line` is a value from the OTHER axis's line list (the
+      // one just crossed), which is exactly the right coordinate type for
+      // a turn candidate (axis flips) but the wrong type for the
+      // straight-ahead candidate (same axis) — that one needs the car's
+      // own current cross coordinate instead.
+      const allowed = (ci) => {
+        const cand = CARDINALS[ci];
+        const refLine = cand.axis === car.axis ? (car.axis==='z' ? car.x : car.z) : line;
+        const forced = oneWayDir(cand.axis, refLine);
+        return forced === null || forced === cand.dir;
+      };
+      if(car.fleeing || car.chasing){
         // greedily pick whichever of straight/left/right puts the most
-        // distance between this car and the player a short way ahead
-        let best = idx, bestDist = -Infinity;
+        // (fleeing) or least (chasing — a wanted police car) distance
+        // between this car and the player a short way ahead
+        const maximize = !!car.fleeing;
+        let best = null, bestDist = maximize ? -Infinity : Infinity;
         for(const ci of [idx, (idx+1)%4, (idx+3)%4]){
+          if(!allowed(ci)) continue;
           const cand = CARDINALS[ci];
           const h = cardinalHeading(cand.axis, cand.dir);
           const nx = car.x + Math.sin(h)*60, nz = car.z + Math.cos(h)*60;
           const d = dist2(nx, nz, player.x, player.z);
-          if(d > bestDist){ bestDist = d; best = ci; }
+          if(maximize ? d > bestDist : d < bestDist){ bestDist = d; best = ci; }
         }
-        if(best !== idx){
+        if(best !== null && best !== idx){
           const next = CARDINALS[best];
           const goRight = best === (idx+1)%4;
           car.axis = next.axis;
@@ -1372,13 +1452,17 @@ function updateStreetCar(car, dt){
           setSignal(car, goRight ? 'right' : 'left', 1.0);
         }
       } else if(Math.random() >= 0.55){
-        const goRight = Math.random() < 0.5;
-        const next = CARDINALS[goRight ? (idx+1)%4 : (idx+3)%4];
-        car.axis = next.axis;
-        car.dir = next.dir;
-        car.targetHeading = cardinalHeading(next.axis, next.dir);
-        snapToLane(car, line, line);
-        setSignal(car, goRight ? 'right' : 'left', 1.0);
+        const options = [idx, (idx+1)%4, (idx+3)%4].filter(ci => ci!==idx && allowed(ci));
+        if(options.length){
+          const pick = options[Math.floor(Math.random()*options.length)];
+          const next = CARDINALS[pick];
+          const goRight = pick === (idx+1)%4;
+          car.axis = next.axis;
+          car.dir = next.dir;
+          car.targetHeading = cardinalHeading(next.axis, next.dir);
+          snapToLane(car, line, line);
+          setSignal(car, goRight ? 'right' : 'left', 1.0);
+        }
       }
       break;
     }
@@ -1395,9 +1479,11 @@ function updateStreetCar(car, dt){
     const reversed = CARDINALS[(idx+2)%4];
     car.axis = reversed.axis;
     car.dir = reversed.dir;
-    car.targetHeading = cardinalHeading(reversed.axis, reversed.dir);
     const crossVal = car.axis==='z' ? car.x : car.z;
     const crossLine = nearestStreet(car.axis==='z' ? streetLinesX : streetLinesZ, crossVal);
+    const forcedDir = oneWayDir(car.axis, crossLine);
+    if(forcedDir !== null) car.dir = forcedDir;
+    car.targetHeading = cardinalHeading(car.axis, car.dir);
     snapToLane(car, crossLine, crossLine);
     car.turnCooldown = 1.0;
   }
@@ -1416,6 +1502,90 @@ function allCars(){ return [player, suspect, ...allTraffic()]; }
 // penalty every frame.
 const HAZARD_PENALTY = 1;
 const HAZARD_PENALTY_POLICE = 3;
+
+// Turbo Esprit's real deterrent: break the traffic laws near a cop and
+// they stop patrolling and come after you. Running a red or driving the
+// wrong way only draws a chase if police are already close by; hitting a
+// pedestrian or dog always does, same as the original.
+const WANTED_DURATION = 16, WANTED_CATCH_PENALTY = 8, WANTED_CHASE_RADIUS = 450;
+let wantedTimer = 0;
+
+function triggerWanted(reason){
+  if(wantedTimer <= 0) showBanner('WANTED! ' + reason, 1.3);
+  wantedTimer = WANTED_DURATION;
+}
+
+function updateWantedState(dt){
+  if(wantedTimer <= 0){
+    for(const p of police) if(p.chasing){ p.chasing = false; p.speed = p.maxSpeed; }
+    return;
+  }
+  wantedTimer -= dt;
+  for(const p of police){
+    if(!p.chasing && dist2(p.x,p.z,player.x,player.z) < WANTED_CHASE_RADIUS*WANTED_CHASE_RADIUS){
+      p.chasing = true;
+      p.speed = p.maxSpeed * FLEE_SPEED_MULT;
+    }
+  }
+  for(const p of police){
+    if(p.chasing && dist2(p.x,p.z,player.x,player.z) < CATCH_RADIUS*CATCH_RADIUS){
+      timeLeft -= WANTED_CATCH_PENALTY;
+      showBanner('CAUGHT! -' + WANTED_CATCH_PENALTY + 's', 1.1);
+      SFX.crash();
+      wantedTimer = 0;
+      for(const pp of police){ pp.chasing = false; pp.speed = pp.maxSpeed; }
+      break;
+    }
+  }
+  if(wantedTimer <= 0){
+    for(const p of police){ p.chasing = false; p.speed = p.maxSpeed; }
+  }
+}
+
+function checkPlayerViolations(dt){
+  player.violateCooldown = Math.max(0, (player.violateCooldown||0) - dt);
+  if(player.violateCooldown > 0) return;
+  const policeNear = () => police.some(p => dist2(p.x,p.z,player.x,player.z) < 350*350);
+
+  for(const tl of trafficLights){
+    const axis = player.axis, dir = player.dir;
+    const lineCoord = axis==='z' ? tl.z : tl.x;
+    const crossCoord = axis==='z' ? tl.x : tl.z;
+    const cross = axis==='z' ? player.x : player.z;
+    if(Math.abs(cross-crossCoord) > 8) continue;
+    const forward = axis==='z' ? player.z : player.x;
+    const distToLine = dir>0 ? (lineCoord-forward) : (forward-lineCoord);
+    if(Math.abs(distToLine) < 10 && Math.abs(player.speed) > 30 && trafficPhase(axis, worldTime) !== 'green'){
+      if(policeNear()) triggerWanted('RAN A RED LIGHT');
+      player.violateCooldown = 3;
+      return;
+    }
+  }
+
+  const forcedDir = oneWayDir(player.axis, player.axis==='z' ? player.x : player.z);
+  if(forcedDir !== null && forcedDir !== player.dir && Math.abs(player.speed) > 20){
+    if(policeNear()) triggerWanted('WRONG WAY');
+    player.violateCooldown = 3;
+    return;
+  }
+
+  for(const p of pedestrianPositions()){
+    if(dist2(player.x,player.z,p.x,p.z) < 12*12 && Math.abs(player.speed) > 15){
+      triggerWanted('HIT A PEDESTRIAN');
+      player.speed *= 0.3;
+      player.violateCooldown = 2;
+      return;
+    }
+  }
+  for(const d of dogPositions()){
+    if(dist2(player.x,player.z,d.x,d.z) < 10*10 && Math.abs(player.speed) > 15){
+      triggerWanted('HIT A DOG');
+      player.speed *= 0.3;
+      player.violateCooldown = 2;
+      return;
+    }
+  }
+}
 
 // UK-style complementary phases: z-axis (NS) green, then amber, then an
 // all-red safety gap, then x-axis (EW) gets the same — amber means stop,
@@ -1588,6 +1758,8 @@ function update(dt){
   updateAmbientHonks(dt);
   updateDonutBreaks(dt);
   updateClubAudio();
+  checkPlayerViolations(dt);
+  updateWantedState(dt);
   updateStreetCar(suspect, dt);
   for(const car of allTraffic()) updateStreetCar(car, dt);
 
@@ -2680,6 +2852,29 @@ function buildBeaconQuads(bx, bz){
   return quads;
 }
 
+// A massive freestanding billboard on two support legs, mounted on the
+// wall well clear of any building footprint. The slogan itself is drawn
+// as real canvas text in a separate pass at the end of drawScene — the
+// polygon pipeline has no font rendering, so this is the one thing on
+// screen that isn't a flat-shaded quad.
+function buildBillboardQuads(bb){
+  const s = Math.sin(bb.facing), c = Math.cos(bb.facing);
+  function tw(lx, ly, lz){ return [bb.x + (lx*c + lz*s), ly, bb.z + (-lx*s + lz*c)]; }
+  const quads = [];
+  const hw = 36, y0 = 20, y1 = 54;
+  for(const lx of [-hw+6, hw-6]){
+    quads.push({pts:[tw(lx-1.5,0,0),tw(lx-1.5,y0+2,0),tw(lx+1.5,y0+2,0),tw(lx+1.5,0,0)], color:'rgb(90,92,96)'});
+  }
+  const panelColor = 'rgb(235,232,225)', frameColor = 'rgb(70,72,76)';
+  quads.push({pts:[tw(-hw,y0,0.3),tw(-hw,y1,0.3),tw(hw,y1,0.3),tw(hw,y0,0.3)], color:panelColor});
+  quads.push({pts:[tw(hw,y0,-0.3),tw(hw,y1,-0.3),tw(-hw,y1,-0.3),tw(-hw,y0,-0.3)], color:panelColor});
+  quads.push({pts:[tw(-hw-1.5,y0-1.5,0),tw(-hw-1.5,y1+1.5,0),tw(-hw,y1+1.5,0),tw(-hw,y0-1.5,0)], color:frameColor});
+  quads.push({pts:[tw(hw,y0-1.5,0),tw(hw,y1+1.5,0),tw(hw+1.5,y1+1.5,0),tw(hw+1.5,y0-1.5,0)], color:frameColor});
+  quads.push({pts:[tw(-hw-1.5,y1,0),tw(-hw-1.5,y1+1.5,0),tw(hw+1.5,y1+1.5,0),tw(hw+1.5,y1,0)], color:frameColor});
+  quads.push({pts:[tw(-hw-1.5,y0-1.5,0),tw(-hw-1.5,y0,0),tw(hw+1.5,y0,0),tw(hw+1.5,y0-1.5,0)], color:frameColor});
+  return quads;
+}
+
 function buildSignQuads(sg){
   const quads = [];
   const poleH = 26, px = sg.x, pz = sg.z;
@@ -2700,17 +2895,6 @@ function buildSignQuads(sg){
     const hw=7, hh=5;
     quads.push({pts:[[px-hw,cy-hh,pz],[px-hw,cy+hh,pz],[px+hw,cy+hh,pz],[px+hw,cy-hh,pz]], color:'rgb(235,150,30)'});
     quads.push({pts:[[px-hw+1.5,cy-hh+1,pz-0.3],[px-hw+1,cy+hh-1,pz-0.3],[px+hw-1,cy+hh-1,pz-0.3],[px+hw-1.5,cy-hh+1,pz-0.3]], color:'rgb(30,30,32)'});
-  } else if(sg.type==='neon'){
-    // a glowing shopfront sign: a dark board with a bright chasing border
-    // — fixed colors, not run through shadeColor, so it genuinely stands
-    // out at night the way a real neon sign would
-    const hw=9, hh=7, ny = cy+3;
-    const neon = ['rgba(255,60,170,0.95)','rgba(60,210,255,0.95)','rgba(255,205,50,0.95)','rgba(110,255,120,0.95)'];
-    const idx = Math.floor(worldTime*1.6 + (sg.x+sg.z)*0.015);
-    const glow = neon[((idx%neon.length)+neon.length)%neon.length];
-    quads.push({pts:[[px-hw,ny-hh,pz],[px-hw,ny+hh,pz],[px+hw,ny+hh,pz],[px+hw,ny-hh,pz]], color:glow});
-    quads.push({pts:[[px-hw+1.6,ny-hh+1.6,pz-0.3],[px-hw+1.6,ny+hh-1.6,pz-0.3],[px+hw-1.6,ny+hh-1.6,pz-0.3],[px+hw-1.6,ny-hh+1.6,pz-0.3]], color:'rgb(18,16,20)'});
-    quads.push({pts:[[px-hw+3.5,ny-2,pz-0.5],[px-hw+3.5,ny+2,pz-0.5],[px+hw-3.5,ny+2,pz-0.5],[px+hw-3.5,ny-2,pz-0.5]], color:glow});
   } else {
     const hw=8, hh=5;
     quads.push({pts:[[px-hw,cy-hh,pz],[px-hw,cy+hh,pz],[px+hw,cy+hh,pz],[px+hw,cy-hh,pz]], color:'rgb(30,80,150)'});
@@ -3092,6 +3276,13 @@ function drawScene(){
       allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
     }
   }
+  for(const bb of billboards){
+    const d = dist2(cam.x,cam.z,bb.x,bb.z);
+    if(d > RENDER_DIST*RENDER_DIST) continue;
+    for(const f of buildBillboardQuads(bb)){
+      allFaces.push({pts:f.pts, color:f.color, stroke:'rgba(0,0,0,0.4)', width:1, depth:faceDepth(f.pts, cam)});
+    }
+  }
   for(const rw of roadworks){
     const rx=(rw.x1+rw.x2)/2, rz=(rw.z1+rw.z2)/2;
     const d = dist2(cam.x,cam.z,rx,rz);
@@ -3149,6 +3340,29 @@ function drawScene(){
     const proj = projectFace(f.pts, cam);
     if(!proj) continue;
     polyFill(proj, f.color, f.stroke, f.width);
+  }
+
+  // billboard slogans, drawn as real canvas text on top of everything —
+  // simplest way to keep them legible without a proper occlusion pass,
+  // and billboards are always out at the city's edge with a clear
+  // approach anyway
+  for(const bb of billboards){
+    if(dist2(cam.x,cam.z,bb.x,bb.z) > (RENDER_DIST*0.6)*(RENDER_DIST*0.6)) continue;
+    const s = Math.sin(bb.facing), c = Math.cos(bb.facing);
+    const wx = bb.x + 0.6*s, wz = bb.z + 0.6*c, wy = 37;
+    const camP = toCamSpace(wx, wy, wz, cam);
+    if(camP.z <= NEAR) continue;
+    const screen = toScreen(camP);
+    if(screen.x < -200 || screen.x > W+200 || screen.y < -100 || screen.y > H+100) continue;
+    const scaleByLen = clamp(16/bb.slogan.length, 0.4, 1);
+    const fontSize = clamp(1900/camP.z * scaleByLen, 6, 30);
+    ctx.save();
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.fillStyle = 'rgba(25,24,28,0.92)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(bb.slogan, screen.x, screen.y);
+    ctx.restore();
   }
 }
 
