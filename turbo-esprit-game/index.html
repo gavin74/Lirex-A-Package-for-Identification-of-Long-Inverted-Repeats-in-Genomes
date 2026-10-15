@@ -170,8 +170,8 @@ const RENDER_DIST = 1000;
 const NEAR = 4;
 const FOV_FOCAL = 260;
 const HORIZON_Y = 205;
-const CAM_HEIGHT = 34;
-const CAM_BACK = 30;
+const CAM_HEIGHT = 27;             // lower + closer than before — Turbo Esprit's chase cam
+const CAM_BACK = 23;               // showed much more of the car's own body
 const CATCH_RADIUS = 24;
 const START_TIME = 110;
 const CATCH_BONUS_TIME = 18;
@@ -198,6 +198,9 @@ const TL_STOP_WINDOW = 26;         // how far ahead of a red/amber light traffic
 const SIGN_TYPES = ['stop','give_way','speed','direction'];
 const DRIVE_SIDE = 'right';        // 'right' (US-style, default) or 'left' (UK-style) —
                                     // flips which lane counts as "correct" after a turn
+const DAY_LENGTH = 150;            // seconds for a full day/night cycle — keeps advancing
+                                    // across restarts, not tied to the per-round timer
+const SUSPECT_RADAR_RANGE = 700;   // minimap: beyond this the target's blip gets noisy/unreliable
 
 // light, near-white material tints — closer to the flat-shaded white
 // polygons of the original Spectrum game than a mid grey, but each
@@ -1050,10 +1053,11 @@ function updatePendingTurn(){
 function updatePlayer(dt){
   const accel = keys['arrowup']||keys['w'];
   const brake = keys['arrowdown']||keys['s'];
+  player.braking = !!brake;
 
   if(accel) player.speed += 150*dt;
   else if(brake) player.speed -= 220*dt;
-  else player.speed -= Math.sign(player.speed)*55*dt;
+  else player.speed -= Math.sign(player.speed)*80*dt; // more engine-braking bite, less coast-forever glide
 
   player.speed = clamp(player.speed, -90, player.maxSpeed);
   if(Math.abs(player.speed) < 2 && !accel && !brake) player.speed = 0;
@@ -1066,8 +1070,17 @@ function updatePlayer(dt){
   // down the current street at that lane offset
   const targetOffset = player.lane * LANE_OFFSET;
   const maxSlide = LANE_SPEED*dt;
+  const prevLaneOffset = player.laneOffset;
   if(Math.abs(targetOffset-player.laneOffset) <= maxSlide) player.laneOffset = targetOffset;
   else player.laneOffset += Math.sign(targetOffset-player.laneOffset)*maxSlide;
+
+  // a lane change was a pure sideways glide before — no visible steering,
+  // just the car crabbing sideways. This banks the car's rendered nose
+  // (not its physics heading, so the camera stays steady) toward the lane
+  // it's actively sliding into, straightening out once it settles.
+  const laneVel = dt > 0 ? (player.laneOffset - prevLaneOffset) / dt : 0;
+  const yaw = clamp(laneVel / LANE_SPEED, -1, 1) * 0.3 * player.dir;
+  player.visualHeading = player.heading + yaw;
 
   const fixedCoord = player.streetCoord + player.laneOffset;
   let nx, nz;
@@ -1140,7 +1153,8 @@ function collideWorld(x, z, r){
 
 function updateStreetCar(car, dt){
   const exempt = car.fleeing || car.type==='ambulance' || car.type==='firetruck';
-  if(!exempt && redLightAhead(car)) return;
+  if(!exempt && redLightAhead(car)){ car.braking = true; return; }
+  car.braking = !!car.donutBreak;
 
   // honked at: a brief startled burst of speed, like scattering out of
   // the way — reset by honk() whenever the player leans on the horn nearby
@@ -1504,12 +1518,56 @@ function polyFill(pts, color, stroke, width){
   if(stroke){ ctx.strokeStyle = stroke; ctx.lineWidth = width || 1; ctx.stroke(); }
 }
 
+// Day/night: every shaded surface (buildings, walls, cars, street
+// furniture — anything going through shadeColor) darkens toward night via
+// one global multiplier, dayAmbient. Fixed-color lights (headlights,
+// windows, traffic signals, neon) are untouched, so they read as
+// genuinely lit against a darkened city instead of just scaling down too.
+let dayAmbient = 1;
 function shadeColor(base, k){
   // base is [r,g,b]
-  const r = clamp(Math.round(base[0]*k),0,255);
-  const g = clamp(Math.round(base[1]*k),0,255);
-  const b = clamp(Math.round(base[2]*k),0,255);
+  const kk = k*dayAmbient;
+  const r = clamp(Math.round(base[0]*kk),0,255);
+  const g = clamp(Math.round(base[1]*kk),0,255);
+  const b = clamp(Math.round(base[2]*kk),0,255);
   return `rgb(${r},${g},${b})`;
+}
+
+function lerp(a,b,t){ return a+(b-a)*t; }
+function lerpColor3(c1,c2,t){ return [lerp(c1[0],c2[0],t), lerp(c1[1],c2[1],t), lerp(c1[2],c2[2],t)]; }
+function rgbStr(c){ return `rgb(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])})`; }
+
+// keyframes across one full cycle (p in [0,1)): dawn -> day -> dusk ->
+// (fast drop) -> night -> pre-dawn -> back to dawn
+const DAY_KEYFRAMES = [
+  { p:0.00, top:[70,85,105],  bottom:[150,160,172], ground:[72,74,78], ambient:0.9  },
+  { p:0.22, top:[75,88,100],  bottom:[124,136,148], ground:[74,76,79], ambient:1.0  },
+  { p:0.46, top:[95,72,68],   bottom:[205,135,92],  ground:[82,72,66], ambient:0.8  },
+  { p:0.54, top:[22,22,42],   bottom:[52,42,66],    ground:[36,37,44], ambient:0.38 },
+  { p:0.75, top:[7,8,15],     bottom:[16,18,28],    ground:[20,21,25], ambient:0.2  },
+  { p:0.94, top:[42,42,66],   bottom:[112,96,100],  ground:[56,53,59], ambient:0.48 },
+  { p:1.00, top:[70,85,105],  bottom:[150,160,172], ground:[72,74,78], ambient:0.9  }
+];
+function dayNightSample(p){
+  let a = DAY_KEYFRAMES[0], b = DAY_KEYFRAMES[DAY_KEYFRAMES.length-1];
+  for(let i=0;i<DAY_KEYFRAMES.length-1;i++){
+    if(p >= DAY_KEYFRAMES[i].p && p <= DAY_KEYFRAMES[i+1].p){ a=DAY_KEYFRAMES[i]; b=DAY_KEYFRAMES[i+1]; break; }
+  }
+  const span = b.p - a.p;
+  const t = span > 0 ? (p - a.p)/span : 0;
+  return {
+    top: lerpColor3(a.top,b.top,t), bottom: lerpColor3(a.bottom,b.bottom,t),
+    ground: lerpColor3(a.ground,b.ground,t), ambient: lerp(a.ambient,b.ambient,t)
+  };
+}
+
+let dayClock = 0;
+let skyTop = [75,88,100], skyBottom = [124,136,148], groundColor = [74,76,79];
+function updateDayNight(dt){
+  dayClock += dt;
+  const p = (dayClock % DAY_LENGTH) / DAY_LENGTH;
+  const s = dayNightSample(p);
+  skyTop = s.top; skyBottom = s.bottom; groundColor = s.ground; dayAmbient = s.ambient;
 }
 
 // Builds the 4 corners of a vertical rectangle lying in a face's plane —
@@ -1756,7 +1814,7 @@ function buildCarQuads(car){
   const glass = 'rgb(38,44,52)';
   const tire = 'rgb(16,16,18)';
   const headlight = 'rgb(255,248,222)';
-  const taillight = 'rgb(206,64,54)';
+  const taillight = car.braking ? 'rgb(255,50,40)' : 'rgb(206,64,54)';
 
   const HW = 7.5, NOSE = 15, TAIL = -15, CB = 3, CT = 9;
   const quads = [];
@@ -1852,7 +1910,7 @@ function buildSportsQuads(car){
   const glass = 'rgb(38,44,52)';
   const tire = 'rgb(16,16,18)';
   const headlight = 'rgb(255,248,222)';
-  const taillight = 'rgb(206,64,54)';
+  const taillight = car.braking ? 'rgb(255,50,40)' : 'rgb(206,64,54)';
   const intake = 'rgb(26,28,32)';
 
   const HW = 7.0, NOSE = 17, TAIL = -14, CB = 2.5;
@@ -1942,7 +2000,7 @@ function buildVanQuads(car){
   const glass = 'rgb(38,44,52)';
   const tire = 'rgb(16,16,18)';
   const headlight = 'rgb(255,248,222)';
-  const taillight = 'rgb(206,64,54)';
+  const taillight = car.braking ? 'rgb(255,50,40)' : 'rgb(206,64,54)';
 
   const HW = 7.8, NOSE = 16, TAIL = -16, CB = 3, CT = 15;
   const quads = [];
@@ -1993,7 +2051,7 @@ function buildMotorbikeQuads(car){
   const bodyDark = shadeColor(rgb, 0.75);
   const tire = 'rgb(14,14,16)';
   const headlight = 'rgb(255,248,222)';
-  const taillight = 'rgb(206,64,54)';
+  const taillight = car.braking ? 'rgb(255,50,40)' : 'rgb(206,64,54)';
 
   const HW = 2.0, NOSE = 11, TAIL = -11, CB = 2, CT = 7;
   const quads = [];
@@ -2042,7 +2100,7 @@ function buildEbikeQuads(car){
   const bodyDark = shadeColor(rgb, 0.75);
   const tire = 'rgb(14,14,16)';
   const headlight = 'rgb(255,248,222)';
-  const taillight = 'rgb(206,64,54)';
+  const taillight = car.braking ? 'rgb(255,50,40)' : 'rgb(206,64,54)';
 
   const HW = 1.4, NOSE = 8, TAIL = -8, CB = 1.5, CT = 5;
   const quads = [];
@@ -2088,7 +2146,7 @@ function buildAmbulanceQuads(car){
   const glass = 'rgb(38,44,52)';
   const tire = 'rgb(16,16,18)';
   const headlight = 'rgb(255,248,222)';
-  const taillight = 'rgb(206,64,54)';
+  const taillight = car.braking ? 'rgb(255,50,40)' : 'rgb(206,64,54)';
 
   const HW = 8.5, NOSE = 19, TAIL = -19, CB = 3, CT = 17;
   const quads = [];
@@ -2392,12 +2450,12 @@ function buildDogQuads(d){
 function drawScene(){
   // sky
   const grad = ctx.createLinearGradient(0,0,0,HORIZON_Y);
-  grad.addColorStop(0, '#4b5560');
-  grad.addColorStop(1, '#7c8894');
+  grad.addColorStop(0, rgbStr(skyTop));
+  grad.addColorStop(1, rgbStr(skyBottom));
   ctx.fillStyle = grad;
   ctx.fillRect(0,0,W,HORIZON_Y);
   // ground
-  ctx.fillStyle = '#4a4c4f';
+  ctx.fillStyle = rgbStr(groundColor);
   ctx.fillRect(0,HORIZON_Y,W,H-HORIZON_Y);
   // subtle ground shading
   const g2 = ctx.createLinearGradient(0,HORIZON_Y,0,H);
@@ -2652,6 +2710,7 @@ let lastT = performance.now();
 function frame(t){
   const dt = Math.min(0.05, (t-lastT)/1000);
   lastT = t;
+  updateDayNight(dt); // keeps advancing even on the start screen, gameState aside
   update(dt);
   if(player){
     drawScene();
