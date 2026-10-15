@@ -62,6 +62,7 @@
   .label{color:var(--dim);font-size:11px}
   .bar{width:100px;height:8px;background:#111;border:1px solid #444;margin-top:2px}
   .bar > i{display:block;height:100%;background:var(--good)}
+  #speedbar > i{background:var(--accent);transition:width 0.08s linear}
   #fuelbar.low > i{background:var(--bad)}
   #minimap{border:1px solid var(--panel-edge);background:rgba(8,9,10,.76)}
   .clickable{cursor:pointer;pointer-events:auto;color:var(--good)}
@@ -112,6 +113,7 @@
     <div id="hud">
       <div class="box">
         <div class="row"><span class="label">SPEED</span><span id="hudSpeed">000</span></div>
+        <div id="speedbar" class="bar"><i style="width:0%"></i></div>
         <div id="fuelWrap">
           <div class="row"><span class="label">FUEL</span></div>
           <div id="fuelbar" class="bar"><i style="width:100%"></i></div>
@@ -195,7 +197,7 @@ const ROUNDABOUTS_ENABLED = true;  // experimental, flag-gated per request — a
 const ROAD_HALF = (BLOCK - BUILD_HALF*2) / 2; // half-width of the drivable gap between buildings
 const TL_CYCLE = 7, TL_AMBER = 1.2, TL_GAP = 1.0; // traffic-light phase timing (seconds)
 const TL_STOP_WINDOW = 26;         // how far ahead of a red/amber light traffic stops
-const SIGN_TYPES = ['stop','give_way','speed','direction'];
+const SIGN_TYPES = ['stop','give_way','speed','direction','neon','neon'];
 const DRIVE_SIDE = 'right';        // 'right' (US-style, default) or 'left' (UK-style) —
                                     // flips which lane counts as "correct" after a turn
 const DAY_LENGTH = 150;            // seconds for a full day/night cycle — keeps advancing
@@ -237,6 +239,8 @@ let trafficLights = [];// {x,z}
 let crossings = [];    // {x,z,axis} zebra crossings paired with each traffic light
 let signs = [];        // {x,z,type}
 let roadworks = [];    // {x1,x2,z1,z2,cones,signX,signZ} — collidable lane closures
+let sidewalkBeats = []; // {x,z,axis,hasDog} — where pedestrians/dogs walk the curb
+let sidewalks = [];    // {x1,x2,z1,z2} flat pavement strips along every curb
 let streetLinesX = [];
 let streetLinesZ = [];
 let worldTime = 0;     // elapsed play time, drives party-building light cycles
@@ -308,6 +312,27 @@ function generateCity(seed){
     }
   }
 
+  // sidewalks: a flat pavement strip hugging each curb, one segment per
+  // block so distance culling works the same as the road markings above
+  sidewalks = [];
+  const swWidth = 7;
+  for(const x of streetLinesX){
+    for(let side of [-1,1]){
+      const sx = x + side*(ROAD_HALF-swWidth/2-1);
+      for(let z=-worldHalfZ;z<worldHalfZ;z+=BLOCK){
+        sidewalks.push({x1:sx-swWidth/2, x2:sx+swWidth/2, z1:z, z2:z+BLOCK});
+      }
+    }
+  }
+  for(const z of streetLinesZ){
+    for(let side of [-1,1]){
+      const sz = z + side*(ROAD_HALF-swWidth/2-1);
+      for(let x=-worldHalfX;x<worldHalfX;x+=BLOCK){
+        sidewalks.push({x1:x, x2:x+BLOCK, z1:sz-swWidth/2, z2:sz+swWidth/2});
+      }
+    }
+  }
+
   // a perimeter wall around the whole city, like the original's — the
   // player was already clamped to stay inside this boundary, now it's
   // visible instead of an invisible wall. One segment per block for a
@@ -349,11 +374,13 @@ function generateCity(seed){
     }
   }
 
-  // a handful of signalled junctions rather than every corner — real
-  // cities don't light every intersection either
+  // more signalled junctions than before (still not every corner — real
+  // cities don't light every intersection either), spread across the grid
+  // so you actually run into one most drives instead of having to go
+  // looking for it
   trafficLights = [];
   crossings = [];
-  for(const ix of [3,6]) for(const iz of [3,6]){
+  for(const ix of [2,4,6]) for(const iz of [2,4,6]){
     const tl = {x:streetLinesX[ix], z:streetLinesZ[iz]};
     trafficLights.push(tl);
     crossings.push({x:tl.x, z:tl.z-30, axis:'z'});
@@ -401,6 +428,25 @@ function generateCity(seed){
     zone.signX = axis==='z' ? cross+laneCenter : zone.x1-10;
     zone.signZ = axis==='z' ? zone.z1-10 : cross+laneCenter;
     roadworks.push(zone);
+  }
+
+  // sidewalk "beats" — points along a curb where a pedestrian (and
+  // sometimes a dog) ambles back and forth, parallel to the street,
+  // rather than only appearing at the road crossings
+  sidewalkBeats = [];
+  const swRnd = mulberry32(seed + 1234);
+  for(let k=0;k<16;k++){
+    const roadAxis = swRnd()<0.5 ? 'z' : 'x';
+    const side = swRnd()<0.5 ? -1 : 1;
+    if(roadAxis==='z'){
+      const ix = Math.floor(swRnd()*streetLinesX.length);
+      const iz = Math.floor(swRnd()*BLOCKS_Z);
+      sidewalkBeats.push({x:streetLinesX[ix]+side*(ROAD_HALF-5), z:cellCenter(iz,BLOCKS_Z), axis:'z', hasDog:swRnd()<0.4});
+    } else {
+      const iz = Math.floor(swRnd()*streetLinesZ.length);
+      const ix = Math.floor(swRnd()*BLOCKS_X);
+      sidewalkBeats.push({x:cellCenter(ix,BLOCKS_X), z:streetLinesZ[iz]+side*(ROAD_HALF-5), axis:'x', hasDog:swRnd()<0.4});
+    }
   }
 }
 
@@ -465,7 +511,7 @@ function updateBlink(dt){
   if(fastBlinkClock <= 0){ fastBlinkOn = !fastBlinkOn; fastBlinkClock = 0.15; }
 }
 
-let player, suspect, police, ambulances, fireTrucks, motorbikes, vans, ebikes, civilians, particles;
+let player, suspect, police, ambulances, fireTrucks, dumpTrucks, motorbikes, vans, ebikes, civilians, particles;
 let bullets = [];
 const CIVILIAN_COLORS = ['#b9bdb2', '#8a9bb0', '#a98f6e', '#8f8f94', '#9bb08a', '#b08a8a'];
 let score, caught, timeLeft, fuel, gameState, roundLevel;
@@ -507,6 +553,10 @@ function resetGame(){
   fireTrucks = [];
   for(let i=0;i<2;i++){
     fireTrucks.push(spawnStreetCar('#c42822', 100, 'firetruck'));
+  }
+  dumpTrucks = [];
+  for(let i=0;i<2;i++){
+    dumpTrucks.push(spawnStreetCar('#e8b430', 65, 'dumptruck'));
   }
   motorbikes = [];
   for(let i=0;i<3;i++){
@@ -1220,7 +1270,7 @@ function updateStreetCar(car, dt){
 
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
-function allTraffic(){ return [...police, ...ambulances, ...fireTrucks, ...motorbikes, ...vans, ...ebikes, ...civilians]; }
+function allTraffic(){ return [...police, ...ambulances, ...fireTrucks, ...dumpTrucks, ...motorbikes, ...vans, ...ebikes, ...civilians]; }
 function allCars(){ return [player, suspect, ...allTraffic()]; }
 
 // Getting too close to any moving traffic costs time and speed — just
@@ -1792,6 +1842,7 @@ function buildVehicleQuads(car){
   if(car.type === 'ebike') return buildEbikeQuads(car);
   if(car.type === 'ambulance') return buildAmbulanceQuads(car);
   if(car.type === 'firetruck') return buildFireTruckQuads(car);
+  if(car.type === 'dumptruck') return buildDumpTruckQuads(car);
   if(car.type === 'police') return buildPoliceQuads(car);
   if(car.type === 'van') return buildVanQuads(car);
   if(car.type === 'sports') return buildSportsQuads(car);
@@ -2035,6 +2086,70 @@ function buildVanQuads(car){
     const amber = 'rgb(255,170,20)';
     quads.push({pts:[tw(bx-1.5,5,NOSE+0.4),tw(bx+1.5,5,NOSE+0.4),tw(bx+1.5,6.8,NOSE+0.4),tw(bx-1.5,6.8,NOSE+0.4)], color:amber});
     quads.push({pts:[tw(bx-1.5,5,TAIL-0.4),tw(bx+1.5,5,TAIL-0.4),tw(bx+1.5,6.8,TAIL-0.4),tw(bx-1.5,6.8,TAIL-0.4)], color:amber});
+  }
+
+  return quads;
+}
+
+// A big yellow construction dump truck: a flat-fronted cab plus a tall
+// open dump bed behind, considerably bigger than anything else on the road.
+function buildDumpTruckQuads(car){
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
+
+  const rgb = carColorRGB(car.color);
+  const body = shadeColor(rgb, 1.0);
+  const bodyDark = shadeColor(rgb, 0.75);
+  const bodyLight = shadeColor(rgb, 1.2);
+  const rib = shadeColor(rgb, 0.65);
+  const glass = 'rgb(38,44,52)';
+  const tire = 'rgb(16,16,18)';
+  const headlight = 'rgb(255,248,222)';
+  const taillight = car.braking ? 'rgb(255,50,40)' : 'rgb(206,64,54)';
+
+  const HW = 10.5, NOSE = 15, CABBACK = -3, TAIL = -27, CB = 4.5, CT_CAB = 16, CT_BED = 23;
+  const quads = [];
+
+  const cB = [tw(-HW,CB,CABBACK), tw(HW,CB,CABBACK), tw(HW,CB,NOSE), tw(-HW,CB,NOSE)];
+  const cT = [tw(-HW,CT_CAB,CABBACK), tw(HW,CT_CAB,CABBACK), tw(HW,CT_CAB,NOSE), tw(-HW,CT_CAB,NOSE)];
+  quads.push({pts:[cB[0],cT[0],cT[1],cB[1]], color:bodyDark});
+  quads.push({pts:[cB[1],cT[1],cT[2],cB[2]], color:bodyLight});
+  quads.push({pts:[cB[2],cT[2],cT[3],cB[3]], color:body});
+  quads.push({pts:[cB[3],cT[3],cT[0],cB[0]], color:bodyDark});
+  quads.push({pts:[cT[0],cT[1],cT[2],cT[3]], color:bodyLight});
+  quads.push({pts:[tw(-HW+1.5,CT_CAB-5,NOSE-0.2),tw(HW-1.5,CT_CAB-5,NOSE-0.2),tw(HW-1.5,CT_CAB-0.5,NOSE-0.2),tw(-HW+1.5,CT_CAB-0.5,NOSE-0.2)], color:glass});
+  quads.push(...buildDriverQuads(tw, CT_CAB-6, NOSE-3));
+
+  // the dump bed — taller than the cab, with a sloped headboard behind it
+  const bB = [tw(-HW,CB,TAIL), tw(HW,CB,TAIL), tw(HW,CB,CABBACK), tw(-HW,CB,CABBACK)];
+  const bT = [tw(-HW,CT_BED,TAIL), tw(HW,CT_BED,TAIL), tw(HW,CT_BED,CABBACK), tw(-HW,CT_BED,CABBACK)];
+  quads.push({pts:[bB[0],bT[0],bT[1],bB[1]], color:bodyDark});
+  quads.push({pts:[bB[1],bT[1],bT[2],bB[2]], color:bodyLight});
+  quads.push({pts:[bB[3],bT[3],bT[0],bB[0]], color:bodyDark});
+  quads.push({pts:[bT[0],bT[1],bT[2],bT[3]], color:body});
+  quads.push({pts:[tw(-HW,CT_CAB,CABBACK),tw(HW,CT_CAB,CABBACK),tw(HW,CT_BED,CABBACK),tw(-HW,CT_BED,CABBACK)], color:bodyLight});
+
+  // ribbed flanks so the bed reads as corrugated sheet metal, not a slab
+  for(let i=0;i<4;i++){
+    const rz = TAIL + 4 + i*5.5;
+    quads.push({pts:[tw(HW,CB+1,rz),tw(HW,CT_BED-1,rz),tw(HW,CT_BED-1,rz+1.6),tw(HW,CB+1,rz+1.6)], color:rib});
+    quads.push({pts:[tw(-HW,CB+1,rz+1.6),tw(-HW,CT_BED-1,rz+1.6),tw(-HW,CT_BED-1,rz),tw(-HW,CB+1,rz)], color:rib});
+  }
+
+  quads.push({pts:[tw(-HW+1.5,5,TAIL),tw(-5,5,TAIL),tw(-5,8,TAIL),tw(-HW+1.5,8,TAIL)], color:taillight});
+  quads.push({pts:[tw(5,5,TAIL),tw(HW-1.5,5,TAIL),tw(HW-1.5,8,TAIL),tw(5,8,TAIL)], color:taillight});
+  quads.push({pts:[tw(-HW,0,TAIL+2),tw(-HW+4.5,0,TAIL+2),tw(-HW+4.5,CB,TAIL+2),tw(-HW,CB,TAIL+2)], color:tire});
+  quads.push({pts:[tw(HW-4.5,0,TAIL+2),tw(HW,0,TAIL+2),tw(HW,CB,TAIL+2),tw(HW-4.5,CB,TAIL+2)], color:tire});
+  quads.push({pts:[tw(-HW+1.5,5,NOSE),tw(-5,5,NOSE),tw(-5,8,NOSE),tw(-HW+1.5,8,NOSE)], color:headlight});
+  quads.push({pts:[tw(5,5,NOSE),tw(HW-1.5,5,NOSE),tw(HW-1.5,8,NOSE),tw(5,8,NOSE)], color:headlight});
+  quads.push({pts:[tw(-HW,0,NOSE-2),tw(-HW+4.5,0,NOSE-2),tw(-HW+4.5,CB,NOSE-2),tw(-HW,CB,NOSE-2)], color:tire});
+  quads.push({pts:[tw(HW-4.5,0,NOSE-2),tw(HW,0,NOSE-2),tw(HW,CB,NOSE-2),tw(HW-4.5,CB,NOSE-2)], color:tire});
+
+  if(blinkOn && car.signal){
+    const bx = (car.signal==='left' ? -1 : 1) * (HW - 1.5);
+    const amber = 'rgb(255,170,20)';
+    quads.push({pts:[tw(bx-1.8,6,NOSE+0.4),tw(bx+1.8,6,NOSE+0.4),tw(bx+1.8,8,NOSE+0.4),tw(bx-1.8,8,NOSE+0.4)], color:amber});
+    quads.push({pts:[tw(bx-1.8,6,TAIL-0.4),tw(bx+1.8,6,TAIL-0.4),tw(bx+1.8,8,TAIL-0.4),tw(bx-1.8,8,TAIL-0.4)], color:amber});
   }
 
   return quads;
@@ -2350,6 +2465,17 @@ function buildSignQuads(sg){
     const hw=7, hh=5;
     quads.push({pts:[[px-hw,cy-hh,pz],[px-hw,cy+hh,pz],[px+hw,cy+hh,pz],[px+hw,cy-hh,pz]], color:'rgb(235,150,30)'});
     quads.push({pts:[[px-hw+1.5,cy-hh+1,pz-0.3],[px-hw+1,cy+hh-1,pz-0.3],[px+hw-1,cy+hh-1,pz-0.3],[px+hw-1.5,cy-hh+1,pz-0.3]], color:'rgb(30,30,32)'});
+  } else if(sg.type==='neon'){
+    // a glowing shopfront sign: a dark board with a bright chasing border
+    // — fixed colors, not run through shadeColor, so it genuinely stands
+    // out at night the way a real neon sign would
+    const hw=9, hh=7, ny = cy+3;
+    const neon = ['rgba(255,60,170,0.95)','rgba(60,210,255,0.95)','rgba(255,205,50,0.95)','rgba(110,255,120,0.95)'];
+    const idx = Math.floor(worldTime*1.6 + (sg.x+sg.z)*0.015);
+    const glow = neon[((idx%neon.length)+neon.length)%neon.length];
+    quads.push({pts:[[px-hw,ny-hh,pz],[px-hw,ny+hh,pz],[px+hw,ny+hh,pz],[px+hw,ny-hh,pz]], color:glow});
+    quads.push({pts:[[px-hw+1.6,ny-hh+1.6,pz-0.3],[px-hw+1.6,ny+hh-1.6,pz-0.3],[px+hw-1.6,ny+hh-1.6,pz-0.3],[px+hw-1.6,ny-hh+1.6,pz-0.3]], color:'rgb(18,16,20)'});
+    quads.push({pts:[[px-hw+3.5,ny-2,pz-0.5],[px-hw+3.5,ny+2,pz-0.5],[px+hw-3.5,ny+2,pz-0.5],[px+hw-3.5,ny-2,pz-0.5]], color:glow});
   } else {
     const hw=8, hh=5;
     quads.push({pts:[[px-hw,cy-hh,pz],[px-hw,cy+hh,pz],[px+hw,cy+hh,pz],[px+hw,cy-hh,pz]], color:'rgb(30,80,150)'});
@@ -2406,6 +2532,18 @@ function pedestrianPositions(){
     const facing = cr.axis==='z' ? Math.PI/2 : 0;
     list.push({x:pos.x, z:pos.z, facing, color:PED_COLORS[i%PED_COLORS.length], walk:ph});
   }
+  // sidewalk beats: a pedestrian ambling along the curb, parallel to the
+  // street, not just crossing it — this is where "walking the dog" lives
+  const swPeriod = 11, swSpan = 46;
+  for(let i=0;i<sidewalkBeats.length;i++){
+    const sb = sidewalkBeats[i];
+    const ph = ((worldTime*0.8 + i*1.9) % swPeriod) / swPeriod;
+    const tri = ph < 0.5 ? ph*2 : 2-ph*2;
+    const off = -swSpan/2 + tri*swSpan;
+    const pos = sb.axis==='z' ? {x:sb.x, z:sb.z+off} : {x:sb.x+off, z:sb.z};
+    const facing = sb.axis==='z' ? 0 : Math.PI/2;
+    list.push({x:pos.x, z:pos.z, facing, color:PED_COLORS[(i+2)%PED_COLORS.length], walk:ph, sidewalk:sb, swOff:off});
+  }
   return list;
 }
 function dogPositions(){
@@ -2420,6 +2558,16 @@ function dogPositions(){
     const pos = cr.axis==='z' ? {x:cr.x+off, z:cr.z-4} : {x:cr.x-4, z:cr.z+off};
     const facing = cr.axis==='z' ? Math.PI/2 : 0;
     list.push({x:pos.x, z:pos.z, facing, walk:ph});
+  }
+  // dogs being walked on the sidewalk beats that have one, trailing just
+  // behind their walker at the same pace — on an invisible leash
+  for(const p of pedestrianPositions()){
+    if(!p.sidewalk || !p.sidewalk.hasDog) continue;
+    const sb = p.sidewalk;
+    const lag = 6;
+    const trail = sb.axis==='z' ? {x:sb.x+3, z:p.z - lag*Math.sign(p.swOff||1)} : {x:p.x - lag*Math.sign(p.swOff||1), z:sb.z+3};
+    const facing = sb.axis==='z' ? 0 : Math.PI/2;
+    list.push({x:trail.x, z:trail.z, facing, walk:p.walk});
   }
   return list;
 }
@@ -2496,6 +2644,16 @@ function drawScene(){
     const pts = [[pad.x-30,0.2,pad.z-20],[pad.x+30,0.2,pad.z-20],[pad.x+30,0.2,pad.z+20],[pad.x-30,0.2,pad.z+20]];
     const proj = projectFace(pts, cam);
     if(proj) polyFill(proj, 'rgba(250,228,236,0.7)', null);
+  }
+
+  // sidewalks — flat pavement strips along every curb, same treatment as
+  // the road markings and zebra crossings below
+  for(const sw of sidewalks){
+    const mx=(sw.x1+sw.x2)/2, mz=(sw.z1+sw.z2)/2;
+    if(dist2(cam.x,cam.z,mx,mz) > markRangeSq) continue;
+    const pts = [[sw.x1,0.12,sw.z1],[sw.x2,0.12,sw.z1],[sw.x2,0.12,sw.z2],[sw.x1,0.12,sw.z2]];
+    const proj = projectFace(pts, cam);
+    if(proj) polyFill(proj, 'rgba(168,163,152,0.6)', null);
   }
 
   // zebra crossings — flat ground decals like the road markings above
@@ -2672,25 +2830,34 @@ function drawMinimap(){
   for(const tl of trafficLights){
     mctx.fillRect(ox+tl.x*scale-1.5, oz-tl.z*scale-1.5, 3, 3);
   }
-  function dot(car, color, r){
+  function dot(x, z, color, r){
     mctx.fillStyle = color;
     mctx.beginPath();
-    mctx.arc(ox+car.x*scale, oz-car.z*scale, r, 0, Math.PI*2);
+    mctx.arc(ox+x*scale, oz-z*scale, r, 0, Math.PI*2);
     mctx.fill();
   }
-  for(const v of civilians) dot(v, '#9aa09a', 2.0);
-  for(const v of vans) dot(v, '#9aa08f', 2.2);
-  for(const v of ebikes) dot(v, '#6fa070', 1.6);
-  for(const p of police) dot(p, '#6fa8ff', 2.4);
-  for(const a of ambulances) dot(a, '#f0f0e6', 2.4);
-  for(const f of fireTrucks) dot(f, '#e05040', 2.3);
-  for(const m of motorbikes) dot(m, '#ff6a3d', 1.8);
-  if(suspect) dot(suspect, '#e8b23a', 2.6);
-  dot(player, '#ffffff', 3);
+  // Just three things on the radar, not every car in the city: you, your
+  // allies (police — backup, not clutter), and the target. The target's
+  // signal degrades with distance — jittery and occasionally dropping out
+  // when far, same as the original's radar, instead of a clean GPS dot.
+  for(const p of police) dot(p.x, p.z, '#6fa8ff', 2.4);
+  if(suspect){
+    const d = Math.sqrt(dist2(player.x,player.z,suspect.x,suspect.z));
+    const noise = clamp(d/SUSPECT_RADAR_RANGE, 0, 1);
+    if(Math.random() >= noise*0.6){
+      const jitter = noise*7;
+      const jx = (Math.random()*2-1)*jitter/scale, jz = (Math.random()*2-1)*jitter/scale;
+      mctx.globalAlpha = 1 - noise*0.55;
+      dot(suspect.x+jx, suspect.z+jz, '#e8b23a', 2.6);
+      mctx.globalAlpha = 1;
+    }
+  }
+  dot(player.x, player.z, '#ffffff', 3);
 }
 
 function updateHUD(){
   document.getElementById('hudSpeed').textContent = String(Math.round(Math.abs(player.speed))).padStart(3,'0');
+  document.getElementById('speedbar').querySelector('i').style.width = clamp(Math.abs(player.speed)/player.maxSpeed*100,0,100)+'%';
   document.getElementById('hudTime').textContent = String(Math.max(0,Math.ceil(timeLeft)));
   document.getElementById('hudScore').textContent = score;
   document.getElementById('hudCaught').textContent = caught;
@@ -2727,6 +2894,7 @@ suspect = spawnStreetCar('#e8b23a', 120, 'sports');
 police = [spawnStreetCar('#6fa8ff', 90, 'police')];
 ambulances = [spawnStreetCar('#f0f0e6', 85, 'ambulance')];
 fireTrucks = [spawnStreetCar('#c42822', 100, 'firetruck')];
+dumpTrucks = [spawnStreetCar('#e8b430', 65, 'dumptruck')];
 motorbikes = [spawnStreetCar('#ff6a3d', 180, 'motorbike')];
 vans = [spawnStreetCar('#9aa08f', 80, 'van')];
 ebikes = [spawnStreetCar('#6fa070', 60, 'ebike')];
