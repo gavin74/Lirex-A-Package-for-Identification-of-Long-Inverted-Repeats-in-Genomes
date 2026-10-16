@@ -166,7 +166,8 @@
 // ---------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------
-const BLOCKS_X = 9, BLOCKS_Z = 9;
+const BLOCKS_X = 13, BLOCKS_Z = 13;
+const AREA_SCALE = (BLOCKS_X*BLOCKS_Z) / 81; // decorative-density scalar, 1.0 at the original 9x9 size
 const BLOCK = 220;                 // grid spacing
 const BUILD_HALF = 68;             // building footprint half-size (leaves street gaps)
 const RENDER_DIST = 1000;
@@ -260,6 +261,7 @@ let sidewalkBeats = []; // {x,z,axis,hasDog} — where pedestrians/dogs walk the
 let sidewalks = [];    // {x1,x2,z1,z2} flat pavement strips along every curb
 let levelCrossing = {x:0, z:0}; // a single rail crossing on one street
 let oneWayStreets = []; // {axis, line, dir} — the four perimeter streets, one-way round a loop
+let oneWaySigns = []; // {x,z,axis,dir} — big blue British one-way plates along those streets
 let billboards = []; // {x,z,facing,slogan} — massive, freestanding, mounted on the perimeter wall
 let streetLinesX = [];
 let streetLinesZ = [];
@@ -432,7 +434,7 @@ function generateCity(seed){
   signs = [];
   const signRnd = mulberry32(seed + 777);
   const curbOff = ROAD_HALF - 4;
-  for(let k=0;k<14;k++){
+  for(let k=0;k<Math.round(14*AREA_SCALE);k++){
     const ix = 1 + Math.floor(signRnd()*(streetLinesX.length-2));
     const iz = 1 + Math.floor(signRnd()*(streetLinesZ.length-2));
     signs.push({
@@ -447,7 +449,7 @@ function generateCity(seed){
   // traffic doesn't swerve around these yet
   roadworks = [];
   const rwRnd = mulberry32(seed + 999);
-  for(let k=0;k<2;k++){
+  for(let k=0;k<Math.round(2*AREA_SCALE);k++){
     const axis = rwRnd()<0.5 ? 'z' : 'x';
     const lines = axis==='z' ? streetLinesZ : streetLinesX;
     const crossLines = axis==='z' ? streetLinesX : streetLinesZ;
@@ -477,7 +479,7 @@ function generateCity(seed){
   // rather than only appearing at the road crossings
   sidewalkBeats = [];
   const swRnd = mulberry32(seed + 1234);
-  for(let k=0;k<16;k++){
+  for(let k=0;k<Math.round(16*AREA_SCALE);k++){
     const roadAxis = swRnd()<0.5 ? 'z' : 'x';
     const side = swRnd()<0.5 ? -1 : 1;
     if(roadAxis==='z'){
@@ -503,6 +505,21 @@ function generateCity(seed){
     {axis:'x', line: streetLinesZ[0], dir:1},
     {axis:'x', line: streetLinesZ[BLOCKS_Z], dir:-1}
   ];
+
+  // big blue British-style one-way plates mounted on the building-side
+  // curb of each perimeter street (never the wall side), a few spaced out
+  // along each one so you actually pass one on a lap of the loop
+  oneWaySigns = [];
+  for(const ow of oneWayStreets){
+    const range = ow.axis==='z' ? worldHalfZ : worldHalfX;
+    const wallSign = ow.line < 0 ? -1 : 1;
+    const curbCross = ow.line - wallSign*curbOff;
+    for(let k=-1;k<=1;k++){
+      const along = k*range*0.6;
+      const pos = ow.axis==='z' ? {x:curbCross, z:along} : {x:along, z:curbCross};
+      oneWaySigns.push({x:pos.x, z:pos.z, axis:ow.axis, dir:ow.dir});
+    }
+  }
 
   // massive, nonsensical billboards mounted on the perimeter wall, well
   // clear of every building — the earlier roadside "neon sign" version
@@ -2936,6 +2953,29 @@ function buildSignQuads(sg){
   return quads;
 }
 
+// a big blue British-style "one way" plate — a tall rectangle with a
+// vertical white arrow, mounted facing oncoming traffic on the street's
+// own axis (face normal along the travel axis, same convention buildSignQuads
+// uses: the plane holds the cross-axis and height, never the travel axis)
+function buildOneWaySignQuads(sg){
+  const quads = [];
+  const poleH = 24, px = sg.x, pz = sg.z;
+  quads.push({pts:[[px-1,0,pz],[px-1,poleH,pz],[px+1,poleH,pz],[px+1,0,pz]], color:'rgb(140,142,146)'});
+  quads.push({pts:[[px,0,pz-1],[px,poleH,pz-1],[px,poleH,pz+1],[px,0,pz+1]], color:'rgb(140,142,146)'});
+  const cy = poleH+11, hw=6.5, hh=11;
+  const blue = 'rgb(20,70,150)', white = 'rgb(240,240,235)';
+  if(sg.axis==='z'){
+    quads.push({pts:[[px-hw,cy-hh,pz],[px-hw,cy+hh,pz],[px+hw,cy+hh,pz],[px+hw,cy-hh,pz]], color:blue});
+    quads.push({pts:[[px-1.1,cy-hh+2,pz-0.2],[px-1.1,cy+hh-6,pz-0.2],[px+1.1,cy+hh-6,pz-0.2],[px+1.1,cy-hh+2,pz-0.2]], color:white});
+    quads.push({pts:[[px-3.4,cy+hh-6,pz-0.2],[px,cy+hh-1,pz-0.2],[px+3.4,cy+hh-6,pz-0.2],[px,cy+hh-6,pz-0.2]], color:white});
+  } else {
+    quads.push({pts:[[px,cy-hh,pz-hw],[px,cy+hh,pz-hw],[px,cy+hh,pz+hw],[px,cy-hh,pz+hw]], color:blue});
+    quads.push({pts:[[px-0.2,cy-hh+2,pz-1.1],[px-0.2,cy+hh-6,pz-1.1],[px-0.2,cy+hh-6,pz+1.1],[px-0.2,cy-hh+2,pz+1.1]], color:white});
+    quads.push({pts:[[px-0.2,cy+hh-6,pz-3.4],[px-0.2,cy+hh-1,pz],[px-0.2,cy+hh-6,pz+3.4],[px-0.2,cy+hh-6,pz]], color:white});
+  }
+  return quads;
+}
+
 function buildConeQuads(cx, cz){
   const h=9, baseR=3.2, topR=0.6;
   const orange='rgb(230,120,30)', white='rgb(235,235,225)';
@@ -3307,6 +3347,13 @@ function drawScene(){
     const d = dist2(cam.x,cam.z,sg.x,sg.z);
     if(d > RENDER_DIST*RENDER_DIST) continue;
     for(const f of buildSignQuads(sg)){
+      allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
+    }
+  }
+  for(const sg of oneWaySigns){
+    const d = dist2(cam.x,cam.z,sg.x,sg.z);
+    if(d > RENDER_DIST*RENDER_DIST) continue;
+    for(const f of buildOneWaySignQuads(sg)){
       allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
     }
   }
