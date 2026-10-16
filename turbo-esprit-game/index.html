@@ -134,9 +134,9 @@
           Tail the amber <b>suspect car</b> through the walled city.
           Get close before they clock you and they'll bolt — once
           spotted they're faster, so close in quietly. Ram them at speed
-          or shoot them to make the bust before time runs out. Clip a
-          building and you'll stall; clip traffic and you'll lose a
-          little time — more for a <b style="color:#6fa8ff">police car</b>.
+          or shoot them to make the bust before your fuel runs out. Clip a
+          building and you'll stall; clip traffic and you'll burn
+          fuel — more for a <b style="color:#6fa8ff">police car</b>.
         </p>
         <p>
           <span class="keys">&uarr; / W</span> accelerate&nbsp;&nbsp;
@@ -146,9 +146,15 @@
           <span class="keys">SPACE</span> fire&nbsp;&nbsp;
           <span class="keys">H</span> horn&nbsp;&nbsp;
           <span class="keys">T</span> radio<br>
+          <span class="keys">V</span> change view&nbsp;&nbsp;
           <span class="keys">M</span> mute&nbsp;&nbsp;
           <span class="keys">R</span> restart
         </p>
+        <div class="row" style="display:flex;align-items:center;gap:10px;justify-content:center;margin:10px 0;">
+          <label for="trafficSlider" style="font-size:13px;opacity:0.85">TRAFFIC</label>
+          <input type="range" id="trafficSlider" min="0.4" max="3" step="0.2" value="1.6">
+          <span id="trafficSliderVal" style="font-size:13px;opacity:0.85;min-width:2.5em">1.6x</span>
+        </div>
         <div class="go" id="btnStart">PRESS ENTER OR CLICK TO DRIVE</div>
       </div>
     </div>
@@ -166,7 +172,14 @@ const BLOCKS_X = 13, BLOCKS_Z = 13;
 const AREA_SCALE = (BLOCKS_X*BLOCKS_Z) / 81; // decorative-density scalar, 1.0 at the original 9x9 size
 const BLOCK = 600;                 // grid spacing — much bigger city blocks for the same block count
 const BUILD_HALF = 250;            // building footprint half-size (leaves street gaps) — ~4x the original lot size
-const RENDER_DIST = 1000;
+// a plain daytime draw distance feels short against the bigger (600-unit)
+// blocks — pushed out well beyond the old value. At night it eases back
+// down toward RENDER_DIST_NIGHT instead, driven by the same dayAmbient
+// the lighting already uses, so the extra reach is a daylight benefit
+// only: night (and heavy rain/cloud, which also dims dayAmbient) stays
+// genuinely harder to see into, not just darker-looking up close.
+const RENDER_DIST_DAY = 1550, RENDER_DIST_NIGHT = 620;
+let RENDER_DIST = RENDER_DIST_DAY;
 const NEAR = 4;
 const FOV_FOCAL = 260;
 const HORIZON_Y = 205;
@@ -266,6 +279,9 @@ let stopLines = [];   // {x1,x2,z1,z2} solid stop-line markings, one per approac
 let walls = [];        // perimeter wall segments, same shape as a building box
 let roundabouts = [];  // {x,z,r} — see ROUNDABOUTS_ENABLED
 let trafficLights = [];// {x,z}
+let stopSigns = [];    // {x,z,stopAxes:['x'|'z',...]} — the minor-road junctions a traffic light grid leaves uncontrolled
+let stopSignLines = []; // same shape as stopLines, only on the axes stopSigns actually controls
+let stopSignPoles = []; // {x,z,axis,stopKey} — one pole per controlled approach
 let crossings = [];    // {x,z,axis} UK-style zebra crossings — uncontrolled, generated independently of trafficLights
 let signs = [];        // {x,z,type}
 let roadworks = [];    // {x1,x2,z1,z2,cones,signX,signZ} — collidable lane closures
@@ -462,13 +478,28 @@ function generateCity(seed){
     }
   }
 
-  // more signalled junctions than before (still not every corner — real
-  // cities don't light every intersection either), spread across the grid
-  // so you actually run into one most drives instead of having to go
-  // looking for it
+  // Real cities have a road hierarchy: a sparser grid of main roads that
+  // keep moving, with minor streets feeding into them under a stop/give-way
+  // rather than every intersection being an equal, uncontrolled crossing.
+  // Every 3rd line on each axis is a "priority" road; where two priority
+  // roads cross gets a traffic light (spread evenly across the whole grid
+  // now, not clustered in one corner), where a priority road crosses a
+  // minor one the minor side gets a stop sign, and where two minor streets
+  // cross it's an all-way stop. That leaves no junction uncontrolled.
+  const ARTERIAL_STEP = 3;
+  const isArterialX = streetLinesX.map((_, i) => i % ARTERIAL_STEP === 0);
+  const isArterialZ = streetLinesZ.map((_, i) => i % ARTERIAL_STEP === 0);
   trafficLights = [];
-  for(const ix of [2,4,6]) for(const iz of [2,4,6]){
-    trafficLights.push({x:streetLinesX[ix], z:streetLinesZ[iz]});
+  stopSigns = [];
+  for(let ix=0; ix<streetLinesX.length; ix++){
+    for(let iz=0; iz<streetLinesZ.length; iz++){
+      const ax = isArterialX[ix], az = isArterialZ[iz];
+      const x = streetLinesX[ix], z = streetLinesZ[iz];
+      if(ax && az) trafficLights.push({x, z});
+      else if(ax && !az) stopSigns.push({x, z, stopAxes:['x']});
+      else if(!ax && az) stopSigns.push({x, z, stopAxes:['z']});
+      else stopSigns.push({x, z, stopAxes:['x','z']});
+    }
   }
 
   // a solid stop line on each of the 4 approaches to every signalled
@@ -486,6 +517,31 @@ function generateCity(seed){
       const c1 = Math.min(crossCenter, crossFar), c2 = Math.max(crossCenter, crossFar);
       if(axis==='z') stopLines.push({x1:c1, x2:c2, z1:stopAt-stopLineW/2, z2:stopAt+stopLineW/2});
       else stopLines.push({x1:stopAt-stopLineW/2, x2:stopAt+stopLineW/2, z1:c1, z2:c2});
+    }
+  }
+
+  // same stop-line treatment on every approach that a stop sign actually
+  // controls (only the axes in ss.stopAxes — the priority road through an
+  // ax/az junction never gets a line painted across it), plus a sign pole
+  // set back onto the curb corner, a little further from the line than the
+  // signalised junctions' heads so it doesn't crowd the painted line itself
+  stopSignLines = [];
+  stopSignPoles = [];
+  for(const ss of stopSigns){
+    for(const axis of ss.stopAxes){
+      for(const dir of [1,-1]){
+        const laneSign = correctLane(axis, dir);
+        const stopAt = (axis==='z'?ss.z:ss.x) - dir*ROAD_HALF;
+        const crossCenter = axis==='z' ? ss.x : ss.z;
+        const crossFar = crossCenter + laneSign*ROAD_HALF;
+        const c1 = Math.min(crossCenter, crossFar), c2 = Math.max(crossCenter, crossFar);
+        if(axis==='z') stopSignLines.push({x1:c1, x2:c2, z1:stopAt-stopLineW/2, z2:stopAt+stopLineW/2});
+        else stopSignLines.push({x1:stopAt-stopLineW/2, x2:stopAt+stopLineW/2, z1:c1, z2:c2});
+        const curbPos = crossCenter + laneSign*(ROAD_HALF-4);
+        const alongPos = stopAt - dir*6;
+        const pos = axis==='z' ? {x:curbPos, z:alongPos} : {x:alongPos, z:curbPos};
+        stopSignPoles.push({x:pos.x, z:pos.z, axis, stopKey: ss.x+','+ss.z+','+axis});
+      }
     }
   }
 
@@ -534,7 +590,7 @@ function generateCity(seed){
     const along = blockStart + signRnd()*(blockEnd-blockStart);
     const cross = line + (signRnd()<0.5?-curbOff:curbOff);
     const pos = axis==='z' ? {x:cross, z:along} : {x:along, z:cross};
-    signs.push({x:pos.x, z:pos.z, type: SIGN_TYPES[Math.floor(signRnd()*SIGN_TYPES.length)]});
+    signs.push({x:pos.x, z:pos.z, axis, type: SIGN_TYPES[Math.floor(signRnd()*SIGN_TYPES.length)]});
   }
 
   // a handful of street clock towers, hands driven by the actual in-game
@@ -693,7 +749,9 @@ function makeCar(x,z,heading,color,maxSpeed){
   return {x,z,heading,targetHeading:heading,speed:0,color,maxSpeed,type:'car',
            axis:'z', dir:1, turnCooldown:0, alive:true,
            lane:0, laneOffset:0, streetCoord:0, laneHome:x,
-           signal:null, signalTimer:0, fleeing:false, spinout:0};
+           signal:null, signalTimer:0, fleeing:false, spinout:0,
+           plannedTurn:null, turnSignalPlannedFor:null,
+           stopDwell:0, stopSignCleared:null};
 }
 
 // Driving directions as a 4-state cycle (compass convention: heading 0 =
@@ -784,6 +842,10 @@ function resetGame(){
   SFX.sirenStop();
   player.violateCooldown = 0;
   suspect = null;
+  // the ambient traffic pools (everything but emergency services) scale
+  // with the TRAFFIC slider on the start screen — police/ambulance/fire
+  // stay fixed since they're tied to game balance, not street-filling
+  const tCount = (base) => Math.max(1, Math.round(base * trafficDensity));
   police = [];
   for(let i=0;i<3;i++){
     police.push(spawnStreetCar('#6fa8ff', 95, 'police'));
@@ -797,27 +859,27 @@ function resetGame(){
     fireTrucks.push(spawnStreetCar('#c42822', 100, 'firetruck'));
   }
   dumpTrucks = [];
-  for(let i=0;i<2;i++){
+  for(let i=0;i<tCount(2);i++){
     dumpTrucks.push(spawnStreetCar('#e8b430', 65, 'dumptruck'));
   }
   buses = [];
-  for(let i=0;i<2;i++){
+  for(let i=0;i<tCount(2);i++){
     buses.push(spawnStreetCar('#b0221e', 75, 'bus'));
   }
   motorbikes = [];
-  for(let i=0;i<3;i++){
+  for(let i=0;i<tCount(3);i++){
     motorbikes.push(spawnStreetCar('#ff6a3d', 180, 'motorbike'));
   }
   vans = [];
-  for(let i=0;i<2;i++){
+  for(let i=0;i<tCount(2);i++){
     vans.push(spawnStreetCar('#9aa08f', 80, 'van'));
   }
   ebikes = [];
-  for(let i=0;i<2;i++){
+  for(let i=0;i<tCount(2);i++){
     ebikes.push(spawnStreetCar('#6fa070', 60, 'ebike'));
   }
   civilians = [];
-  for(let i=0;i<3;i++){
+  for(let i=0;i<tCount(8);i++){
     civilians.push(spawnStreetCar(CIVILIAN_COLORS[Math.floor(Math.random()*CIVILIAN_COLORS.length)], 110));
   }
   spawnSuspect();
@@ -876,6 +938,7 @@ function spawnSuspect(){
   roundLevel++;
   suspect = spawnStreetCar('#e8b23a', 118 + roundLevel*7, 'sports');
   suspect.fleeing = false;
+  suspect.darkWindows = true; // the suspect reads as more sinister with near-black glass
   // keep it away from the player a bit
   let tries = 0;
   while(dist2(suspect.x,suspect.z,player.x,player.z) < 300*300 && tries<20){
@@ -936,7 +999,15 @@ window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
 if(!FUEL_ENABLED) document.getElementById('fuelDial').style.display = 'none';
 
 document.getElementById('btnStart').addEventListener('click', startGame);
-document.getElementById('wrap').addEventListener('click', ()=>{ if(gameState==='start') startGame(); });
+document.getElementById('wrap').addEventListener('click', (e)=>{ if(gameState==='start' && e.target.id!=='trafficSlider') startGame(); });
+
+let trafficDensity = 1.6;
+const trafficSliderEl = document.getElementById('trafficSlider');
+trafficSliderEl.addEventListener('click', e => e.stopPropagation());
+trafficSliderEl.addEventListener('input', () => {
+  trafficDensity = parseFloat(trafficSliderEl.value);
+  document.getElementById('trafficSliderVal').textContent = trafficDensity.toFixed(1) + 'x';
+});
 
 function startGame(){
   document.getElementById('overlay').classList.add('hidden');
@@ -1539,7 +1610,19 @@ function updatePlayer(dt){
   player.braking = !!brake;
 
   if(spinningOut) player.speed -= Math.sign(player.speed)*140*dt; // skids to a stop, deaf to throttle/brake
-  else if(accel) player.speed += 95*dt; // slower buildup — was leaping to top speed almost instantly
+  else if(accel){
+    // a flat acceleration rate regardless of speed read as smooth/lifeless
+    // no matter how hard you were on the gas. Real torque is strongest low
+    // down and tapers hard as you approach the top of the range; stacking
+    // a brief dip right at each of the REV dial's own 4 gear-change points
+    // on top of that reads as an actual gearbox shifting under load.
+    const speedFrac = clamp(Math.abs(player.speed)/player.maxSpeed, 0, 1);
+    let accelRate = 55 + 230*(1-speedFrac)*(1-speedFrac);
+    const REV_GEARS = 4, gearSpan = player.maxSpeed/REV_GEARS;
+    const gearPos = (Math.abs(player.speed) % gearSpan) / gearSpan;
+    if(gearPos > 0.9 || gearPos < 0.1) accelRate *= 0.4;
+    player.speed += accelRate*dt;
+  }
   else if(brake) player.speed -= 220*dt;
   else player.speed -= Math.sign(player.speed)*80*dt; // more engine-braking bite, less coast-forever glide
 
@@ -1768,6 +1851,16 @@ function updateStreetCar(car, dt){
   if(checkOilSlick(car, dt)){ car.braking = true; return; }
   const exempt = car.fleeing || car.type==='ambulance' || car.type==='firetruck';
   if(!exempt && (redLightAhead(car) || levelCrossingBlocked(car))){ car.braking = true; return; }
+  if(!exempt){
+    const ssKey = stopSignAhead(car);
+    if(ssKey){
+      car.braking = true;
+      car.stopDwell = (car.stopDwell||0) + dt;
+      if(car.stopDwell < STOP_SIGN_DWELL) return;
+      car.stopSignCleared = ssKey;
+      car.stopDwell = 0;
+    }
+  }
   car.braking = !!car.donutBreak;
 
   // honked at: a brief startled burst of speed, like scattering out of
@@ -1812,8 +1905,45 @@ function updateStreetCar(car, dt){
   else { car.x = prospectiveForward; car.z = crossPos; }
 
   car.turnCooldown -= dt;
+  if((car.fleeing || car.chasing) && car.plannedTurn){ car.plannedTurn = null; car.turnSignalPlannedFor = null; }
   const moving = car.axis==='z' ? car.z : car.x;
   const lines = car.axis==='z' ? streetLinesZ : streetLinesX;
+  // ordinary traffic used to decide and execute a turn in the same instant
+  // it reached the junction, so the blinker came on exactly WITH the turn
+  // instead of before it — a real driver signals a little ahead of time.
+  // Ambient (non-fleeing, non-chasing) cars now decide and signal once
+  // they're within TURN_SIGNAL_LOOKAHEAD of the upcoming line, then just
+  // carry that cached decision out once they actually reach it. Fleeing
+  // suspects and chasing police still decide at the junction itself —
+  // they're reacting to where the player is right then, so a decision
+  // made a few car-lengths earlier would already be stale.
+  const TURN_SIGNAL_LOOKAHEAD = 55;
+  if(!car.fleeing && !car.chasing && !car.plannedTurn){
+    for(const line of lines){
+      const aheadOfLine = (line - moving) * car.dir;
+      if(aheadOfLine > 0 && aheadOfLine < TURN_SIGNAL_LOOKAHEAD && car.turnSignalPlannedFor !== line){
+        car.turnSignalPlannedFor = line;
+        const idx = cardinalIndex(car.axis, car.dir);
+        const allowed = (ci) => {
+          const cand = CARDINALS[ci];
+          const refLine = cand.axis === car.axis ? (car.axis==='z' ? car.x : car.z) : line;
+          const forced = oneWayDir(cand.axis, refLine);
+          return forced === null || forced === cand.dir;
+        };
+        if(Math.random() >= 0.55){
+          const options = [idx, (idx+1)%4, (idx+3)%4].filter(ci => ci!==idx && allowed(ci));
+          if(options.length){
+            const pick = options[Math.floor(Math.random()*options.length)];
+            const next = CARDINALS[pick];
+            const goRight = pick === (idx+1)%4;
+            car.plannedTurn = { line, axis: next.axis, dir: next.dir, goRight };
+            setSignal(car, goRight ? 'right' : 'left', 3.0);
+          }
+        }
+        break;
+      }
+    }
+  }
   for(const line of lines){
     if(Math.abs(moving-line) < 4 && car.turnCooldown<=0){
       car.turnCooldown = 1.0;
@@ -1853,18 +1983,18 @@ function updateStreetCar(car, dt){
           snapToLane(car, line, line);
           setSignal(car, goRight ? 'right' : 'left', 1.0);
         }
-      } else if(Math.random() >= 0.55){
-        const options = [idx, (idx+1)%4, (idx+3)%4].filter(ci => ci!==idx && allowed(ci));
-        if(options.length){
-          const pick = options[Math.floor(Math.random()*options.length)];
-          const next = CARDINALS[pick];
-          const goRight = pick === (idx+1)%4;
-          car.axis = next.axis;
-          car.dir = next.dir;
-          car.targetHeading = cardinalHeading(next.axis, next.dir);
-          snapToLane(car, line, line);
-          setSignal(car, goRight ? 'right' : 'left', 1.0);
-        }
+      } else if(car.plannedTurn && car.plannedTurn.line === line){
+        const next = car.plannedTurn;
+        car.axis = next.axis;
+        car.dir = next.dir;
+        car.targetHeading = cardinalHeading(next.axis, next.dir);
+        snapToLane(car, line, line);
+        car.plannedTurn = null;
+        car.turnSignalPlannedFor = null;
+      } else if(!car.fleeing && !car.chasing){
+        // decided to go straight through — clear the lookahead lock so the
+        // next junction down the line gets its own fresh decision
+        car.turnSignalPlannedFor = null;
       }
       break;
     }
@@ -2023,6 +2153,33 @@ function redLightAhead(car){
     }
   }
   return false;
+}
+
+const STOP_SIGN_WINDOW = 22, STOP_SIGN_DWELL = 1.1;
+// a stop sign has no "phase" to wait out like a light does, so each car
+// remembers (car.stopSignCleared) which specific junction+axis it already
+// sat through, and only has to wait there once per approach — otherwise
+// it'd never pull away from a junction it's still within STOP_SIGN_WINDOW
+// of. Clears back to null the moment no stop sign is nearby, so looping
+// back around the block later asks it to stop again like anyone else.
+function stopSignAhead(car){
+  const axis = car.axis, dir = car.dir;
+  const forward = axis==='z' ? car.z : car.x;
+  const cross = axis==='z' ? car.x : car.z;
+  for(const ss of stopSigns){
+    if(!ss.stopAxes.includes(axis)) continue;
+    const lineCoord = axis==='z' ? ss.z : ss.x;
+    const crossCoord = axis==='z' ? ss.x : ss.z;
+    if(Math.abs(cross-crossCoord) > 8) continue;
+    const distToLine = dir>0 ? (lineCoord-forward) : (forward-lineCoord);
+    if(distToLine > 0 && distToLine < STOP_SIGN_WINDOW){
+      const key = ss.x+','+ss.z+','+axis;
+      if(car.stopSignCleared === key) return null;
+      return key;
+    }
+  }
+  if(car.stopSignCleared) car.stopSignCleared = null;
+  return null;
 }
 
 // open -> barrier lowers -> closed (train passes) -> barrier raises -> open
@@ -2336,6 +2493,22 @@ function shadeColor(base, k){
   const b = clamp(Math.round(base[2]*kk),0,255);
   return `rgb(${r},${g},${b})`;
 }
+// car bodies darkened the same way buildings do at night — down to
+// dayAmbient's floor of ~0.2 — which brought a light-colored car's body
+// down to nearly the same darkness as its own fixed-color window glass
+// (glass is deliberately untouched by dayAmbient, same as headlights).
+// The two blending together read as one uniform dark shape ("the
+// batcar") instead of a light car with dark windows. Cars get their own
+// higher ambient floor so the body stays visibly lighter than the glass
+// at any hour.
+const CAR_MIN_AMBIENT = 0.55;
+function carShade(base, k){
+  const kk = k * Math.max(dayAmbient, CAR_MIN_AMBIENT);
+  const r = clamp(Math.round(base[0]*kk),0,255);
+  const g = clamp(Math.round(base[1]*kk),0,255);
+  const b = clamp(Math.round(base[2]*kk),0,255);
+  return `rgb(${r},${g},${b})`;
+}
 
 function lerp(a,b,t){ return a+(b-a)*t; }
 function lerpColor3(c1,c2,t){ return [lerp(c1[0],c2[0],t), lerp(c1[1],c2[1],t), lerp(c1[2],c2[2],t)]; }
@@ -2401,13 +2574,28 @@ function weatherSample(p){
   const t = span > 0 ? smoothstep((p - a.p)/span) : 0;
   return { cloud: lerp(a.cloud,b.cloud,t), rain: lerp(a.rain,b.rain,t) };
 }
+// a fixed-length modulo repeated the exact same clear->cloudy->rain->clear
+// lap every 150s like clockwork — very noticeably periodic over a longer
+// play session. Each lap now gets its own randomized length and its own
+// randomized rain ceiling (so some laps stay cloudy and never really open
+// up, others go straight to a downpour), rolled the instant the previous
+// lap finishes rather than on any fixed schedule.
 let weatherClock = 0;
+let weatherLapStart = 0, weatherLapLength = WEATHER_LENGTH;
+let weatherLapIntensity = 1;
 let cloudiness = 0.05, raininess = 0;
 function updateWeather(dt){
   weatherClock += dt;
-  const p = (weatherClock % WEATHER_LENGTH) / WEATHER_LENGTH;
+  let elapsed = weatherClock - weatherLapStart;
+  if(elapsed >= weatherLapLength){
+    weatherLapStart += weatherLapLength;
+    weatherLapLength = WEATHER_LENGTH * (0.65 + Math.random()*0.9);
+    weatherLapIntensity = 0.35 + Math.random()*0.65;
+    elapsed = weatherClock - weatherLapStart;
+  }
+  const p = elapsed / weatherLapLength;
   const s = weatherSample(p);
-  cloudiness = s.cloud; raininess = s.rain;
+  cloudiness = s.cloud; raininess = s.rain * weatherLapIntensity;
 }
 
 let dayClock = 0;
@@ -2426,6 +2614,10 @@ function updateDayNight(dt){
   skyBottom = lerpColor3(s.bottom, OVERCAST_BOTTOM, overcastT);
   groundColor = lerpColor3(s.ground, OVERCAST_GROUND, overcastT*0.6);
   dayAmbient = s.ambient * (1 - cloudiness*0.18 - raininess*0.12);
+  // draw distance rides the same darkness dayAmbient already tracks (time
+  // of day, cloud, rain combined) — the extra daytime reach never leaks
+  // into conditions that are supposed to be hard to see in
+  RENDER_DIST = lerp(RENDER_DIST_NIGHT, RENDER_DIST_DAY, clamp(dayAmbient, 0, 1));
 }
 
 // Builds the 4 corners of a vertical rectangle lying in a face's plane —
@@ -2703,9 +2895,9 @@ function buildCarQuads(car){
   }
 
   const rgb = carColorRGB(car.color);
-  const body = shadeColor(rgb, 1.0);
-  const bodyDark = shadeColor(rgb, 0.8);
-  const bodyLight = shadeColor(rgb, 1.18);
+  const body = carShade(rgb, 1.0);
+  const bodyDark = carShade(rgb, 0.8);
+  const bodyLight = carShade(rgb, 1.18);
   const glass = 'rgb(38,44,52)';
   const tire = 'rgb(16,16,18)';
   const headlight = 'rgb(255,248,222)';
@@ -2808,11 +3000,11 @@ function buildSportsQuads(car){
   }
 
   const rgb = carColorRGB(car.color);
-  const body = shadeColor(rgb, 1.0);
-  const bodyDark = shadeColor(rgb, 0.8);
-  const bodyLight = shadeColor(rgb, 1.18);
-  const rocker = shadeColor(rgb, 0.4);
-  const glass = 'rgb(38,44,52)';
+  const body = carShade(rgb, 1.0);
+  const bodyDark = carShade(rgb, 0.8);
+  const bodyLight = carShade(rgb, 1.18);
+  const rocker = carShade(rgb, 0.4);
+  const glass = car.darkWindows ? 'rgb(12,13,16)' : 'rgb(38,44,52)';
   const tire = 'rgb(16,16,18)';
   const headlight = 'rgb(255,248,222)';
   const taillight = car.braking ? 'rgb(255,50,40)' : 'rgb(206,64,54)';
@@ -2899,9 +3091,9 @@ function buildVanQuads(car){
   function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
 
   const rgb = carColorRGB(car.color);
-  const body = shadeColor(rgb, 1.0);
-  const bodyDark = shadeColor(rgb, 0.8);
-  const bodyLight = shadeColor(rgb, 1.15);
+  const body = carShade(rgb, 1.0);
+  const bodyDark = carShade(rgb, 0.8);
+  const bodyLight = carShade(rgb, 1.15);
   const glass = 'rgb(38,44,52)';
   const tire = 'rgb(16,16,18)';
   const headlight = 'rgb(255,248,222)';
@@ -2952,10 +3144,10 @@ function buildDumpTruckQuads(car){
   function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
 
   const rgb = carColorRGB(car.color);
-  const body = shadeColor(rgb, 1.0);
-  const bodyDark = shadeColor(rgb, 0.75);
-  const bodyLight = shadeColor(rgb, 1.2);
-  const rib = shadeColor(rgb, 0.65);
+  const body = carShade(rgb, 1.0);
+  const bodyDark = carShade(rgb, 0.75);
+  const bodyLight = carShade(rgb, 1.2);
+  const rib = carShade(rgb, 0.65);
   const glass = 'rgb(38,44,52)';
   const tire = 'rgb(16,16,18)';
   const headlight = 'rgb(255,248,222)';
@@ -3016,8 +3208,8 @@ function buildMotorbikeQuads(car){
   function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
 
   const rgb = carColorRGB(car.color);
-  const body = shadeColor(rgb, 1.0);
-  const bodyDark = shadeColor(rgb, 0.75);
+  const body = carShade(rgb, 1.0);
+  const bodyDark = carShade(rgb, 0.75);
   const tire = 'rgb(14,14,16)';
   const headlight = 'rgb(255,248,222)';
   const taillight = car.braking ? 'rgb(255,50,40)' : 'rgb(206,64,54)';
@@ -3065,8 +3257,8 @@ function buildEbikeQuads(car){
   function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
 
   const rgb = carColorRGB(car.color);
-  const body = shadeColor(rgb, 1.0);
-  const bodyDark = shadeColor(rgb, 0.75);
+  const body = carShade(rgb, 1.0);
+  const bodyDark = carShade(rgb, 0.75);
   const tire = 'rgb(14,14,16)';
   const headlight = 'rgb(255,248,222)';
   const taillight = car.braking ? 'rgb(255,50,40)' : 'rgb(206,64,54)';
@@ -3476,29 +3668,38 @@ function buildClockQuads(c){
   return quads;
 }
 
+// the panel has to lie in whichever plane actually faces the street this
+// sign belongs to (see sg.axis, set at generation time) — it used to
+// always sit in the z=const plane no matter what, so a sign meant for an
+// x-axis street rendered edge-on to that street's own traffic (a near-
+// invisible sliver, reading as a stray marker rather than a roadside
+// sign — the "poles in the middle of the road" report). offAxis(a, b)
+// places a point `a` units along the panel's own in-plane width and `b`
+// units of depth off that plane, in the plane this sign's axis calls for.
 function buildSignQuads(sg){
   const quads = [];
   const poleH = 26, px = sg.x, pz = sg.z;
-  quads.push({pts:[[px-1,0,pz],[px-1,poleH,pz],[px+1,poleH,pz],[px+1,0,pz]], color:'rgb(140,142,146)'});
-  quads.push({pts:[[px,0,pz-1],[px,poleH,pz-1],[px,poleH,pz+1],[px,0,pz+1]], color:'rgb(140,142,146)'});
+  const offAxis = (a, h, b) => sg.axis==='x' ? [px+(b||0), h, pz+a] : [px+a, h, pz+(b||0)];
+  quads.push({pts:[offAxis(-1,0),offAxis(-1,poleH),offAxis(1,poleH),offAxis(1,0)], color:'rgb(140,142,146)'});
+  quads.push({pts:[offAxis(0,0,-1),offAxis(0,poleH,-1),offAxis(0,poleH,1),offAxis(0,0,1)], color:'rgb(140,142,146)'});
   const cy = poleH+4;
   if(sg.type==='stop'){
     const r=6;
-    quads.push({pts:[[px-r,cy,pz],[px,cy+r,pz],[px+r,cy,pz],[px,cy-r,pz]], color:'rgb(205,40,35)'});
+    quads.push({pts:[offAxis(-r,cy),offAxis(0,cy+r),offAxis(r,cy),offAxis(0,cy-r)], color:'rgb(205,40,35)'});
   } else if(sg.type==='give_way'){
     const r=6.5;
-    quads.push({pts:[[px-r,cy-r*0.6,pz],[px+r,cy-r*0.6,pz],[px,cy+r*0.8,pz],[px,cy+r*0.8,pz]], color:'rgb(210,50,45)'});
+    quads.push({pts:[offAxis(-r,cy-r*0.6),offAxis(r,cy-r*0.6),offAxis(0,cy+r*0.8),offAxis(0,cy+r*0.8)], color:'rgb(210,50,45)'});
   } else if(sg.type==='speed'){
     const r=6.2;
-    quads.push({pts:[[px-r,cy-r,pz],[px-r,cy+r,pz],[px+r,cy+r,pz],[px+r,cy-r,pz]], color:'rgb(200,40,35)'});
-    quads.push({pts:[[px-r+1.3,cy-r+1.3,pz-0.2],[px-r+1.3,cy+r-1.3,pz-0.2],[px+r-1.3,cy+r-1.3,pz-0.2],[px+r-1.3,cy-r+1.3,pz-0.2]], color:'rgb(235,235,230)'});
+    quads.push({pts:[offAxis(-r,cy-r),offAxis(-r,cy+r),offAxis(r,cy+r),offAxis(r,cy-r)], color:'rgb(200,40,35)'});
+    quads.push({pts:[offAxis(-r+1.3,cy-r+1.3,-0.2),offAxis(-r+1.3,cy+r-1.3,-0.2),offAxis(r-1.3,cy+r-1.3,-0.2),offAxis(r-1.3,cy-r+1.3,-0.2)], color:'rgb(235,235,230)'});
   } else if(sg.type==='roadworks'){
     const hw=7, hh=5;
-    quads.push({pts:[[px-hw,cy-hh,pz],[px-hw,cy+hh,pz],[px+hw,cy+hh,pz],[px+hw,cy-hh,pz]], color:'rgb(235,150,30)'});
-    quads.push({pts:[[px-hw+1.5,cy-hh+1,pz-0.3],[px-hw+1,cy+hh-1,pz-0.3],[px+hw-1,cy+hh-1,pz-0.3],[px+hw-1.5,cy-hh+1,pz-0.3]], color:'rgb(30,30,32)'});
+    quads.push({pts:[offAxis(-hw,cy-hh),offAxis(-hw,cy+hh),offAxis(hw,cy+hh),offAxis(hw,cy-hh)], color:'rgb(235,150,30)'});
+    quads.push({pts:[offAxis(-hw+1.5,cy-hh+1,-0.3),offAxis(-hw+1,cy+hh-1,-0.3),offAxis(hw-1,cy+hh-1,-0.3),offAxis(hw-1.5,cy-hh+1,-0.3)], color:'rgb(30,30,32)'});
   } else {
     const hw=8, hh=5;
-    quads.push({pts:[[px-hw,cy-hh,pz],[px-hw,cy+hh,pz],[px+hw,cy+hh,pz],[px+hw,cy-hh,pz]], color:'rgb(30,80,150)'});
+    quads.push({pts:[offAxis(-hw,cy-hh),offAxis(-hw,cy+hh),offAxis(hw,cy+hh),offAxis(hw,cy-hh)], color:'rgb(30,80,150)'});
   }
   return quads;
 }
@@ -3552,7 +3753,7 @@ function buildConeQuads(cx, cz){
 function buildRoadworksQuads(zone){
   const quads = [];
   for(const cone of zone.cones) quads.push(...buildConeQuads(cone.x, cone.z));
-  quads.push(...buildSignQuads({x:zone.signX, z:zone.signZ, type:'roadworks'}));
+  quads.push(...buildSignQuads({x:zone.signX, z:zone.signZ, axis:zone.axis, type:'roadworks'}));
   return quads;
 }
 
@@ -3889,6 +4090,13 @@ function drawScene(){
     const proj = projectFace(pts, cam);
     if(proj) polyFill(proj, 'rgba(235,232,222,0.92)', null);
   }
+  for(const sl of stopSignLines){
+    const mx=(sl.x1+sl.x2)/2, mz=(sl.z1+sl.z2)/2;
+    if(dist2(cam.x,cam.z,mx,mz) > markRangeSq) continue;
+    const pts = [[sl.x1,0.15,sl.z1],[sl.x2,0.15,sl.z1],[sl.x2,0.15,sl.z2],[sl.x1,0.15,sl.z2]];
+    const proj = projectFace(pts, cam);
+    if(proj) polyFill(proj, 'rgba(235,232,222,0.92)', null);
+  }
 
   for(const pad of donutPads){
     if(dist2(cam.x,cam.z,pad.x,pad.z) > RENDER_DIST*RENDER_DIST) continue;
@@ -4016,6 +4224,13 @@ function drawScene(){
     const d = dist2(cam.x,cam.z,sg.x,sg.z);
     if(d > RENDER_DIST*RENDER_DIST) continue;
     for(const f of buildSignQuads(sg)){
+      allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
+    }
+  }
+  for(const sp of stopSignPoles){
+    const d = dist2(cam.x,cam.z,sp.x,sp.z);
+    if(d > RENDER_DIST*RENDER_DIST) continue;
+    for(const f of buildSignQuads({x:sp.x, z:sp.z, axis:sp.axis, type:'stop'})){
       allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
     }
   }
