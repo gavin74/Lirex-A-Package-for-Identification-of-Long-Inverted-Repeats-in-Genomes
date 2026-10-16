@@ -118,7 +118,6 @@
       </div>
       <canvas id="minimap" width="140" height="140"></canvas>
       <div class="box" style="text-align:right">
-        <div class="row"><span class="label">TIME</span><span id="hudTime">00</span></div>
         <div class="row"><span class="label">SCORE</span><span id="hudScore">0</span></div>
         <div class="row"><span class="label">CAUGHT</span><span id="hudCaught">0</span></div>
         <div class="row"><span class="label">SOUND (M)</span><span id="hudSound" class="clickable">ON</span></div>
@@ -189,8 +188,8 @@ function cycleCameraMode(){
   showBanner('VIEW: ' + cameraMode.toUpperCase(), 0.9);
 }
 const CATCH_RADIUS = 24;
-const START_TIME = 110;
-const CATCH_BONUS_TIME = 18;
+const CATCH_BONUS_FUEL = 20;       // fuel does the job a time bonus used to — the run is
+                                    // only ever ended by running dry, not a clock
 const START_FUEL = 100;
 const SPOT_RADIUS = 170;           // how close before the suspect notices you and bolts
 const FLEE_SPEED_MULT = 1.25;      // speed boost once the suspect is fleeing
@@ -738,7 +737,7 @@ let bullets = [];
 let oilSlicks = []; // {x,z,life} — dropped behind the player, spins out anything that drives over it
 const OIL_COOLDOWN = 4, OIL_LIFE = 16, OIL_RADIUS = 13;
 const CIVILIAN_COLORS = ['#b9bdb2', '#8a9bb0', '#a98f6e', '#8f8f94', '#9bb08a', '#b08a8a'];
-let score, caught, timeLeft, fuel, gameState, roundLevel;
+let score, caught, fuel, gameState, roundLevel;
 let lastSuspectSpawnGuardTimer = 0;
 let bannerTimer = 0;
 const SHAKE_DURATION = 0.3;
@@ -776,7 +775,7 @@ function resetGame(){
   document.getElementById('overlay').classList.add('hidden');
   generateCity(Date.now() % 100000);
   player = spawnPlayerStart();
-  score = 0; caught = 0; timeLeft = START_TIME; fuel = START_FUEL;
+  score = 0; caught = 0; fuel = START_FUEL;
   roundLevel = 0;
   worldTime = 0;
   bullets = [];
@@ -1903,14 +1902,14 @@ function allCars(){ return [player, suspect, ...allTraffic()]; }
 // everything else costs the same flat, small amount. Debounced via
 // player.hazardCooldown so lingering near one doesn't restack the
 // penalty every frame.
-const HAZARD_PENALTY = 1;
-const HAZARD_PENALTY_POLICE = 3;
+const HAZARD_PENALTY = 4;
+const HAZARD_PENALTY_POLICE = 10;
 
 // Turbo Esprit's real deterrent: break the traffic laws near a cop and
 // they stop patrolling and come after you. Running a red or driving the
 // wrong way only draws a chase if police are already close by; hitting a
 // pedestrian or dog always does, same as the original.
-const WANTED_DURATION = 16, WANTED_CATCH_PENALTY = 8, WANTED_CHASE_RADIUS = 450;
+const WANTED_DURATION = 16, WANTED_CATCH_PENALTY = 15, WANTED_CHASE_RADIUS = 450;
 let wantedTimer = 0;
 
 function triggerWanted(reason){
@@ -1933,8 +1932,8 @@ function updateWantedState(dt){
   }
   for(const p of police){
     if(p.chasing && dist2(p.x,p.z,player.x,player.z) < CATCH_RADIUS*CATCH_RADIUS){
-      timeLeft -= WANTED_CATCH_PENALTY;
-      showBanner('CAUGHT! -' + WANTED_CATCH_PENALTY + 's', 1.1);
+      fuel = clamp(fuel - WANTED_CATCH_PENALTY, 0, 100);
+      showBanner('CAUGHT! -' + WANTED_CATCH_PENALTY + ' FUEL', 1.1);
       SFX.crash();
       SFX.sirenStop();
       wantedTimer = 0;
@@ -2106,7 +2105,7 @@ function bustSuspect(method){
   const pts = Math.round(100 * roundLevel * mult);
   score += pts;
   caught++;
-  timeLeft = Math.min(timeLeft + CATCH_BONUS_TIME, 999);
+  fuel = clamp(fuel + CATCH_BONUS_FUEL, 0, 100);
   showBanner((method==='ram' ? 'RAMMED! +' : 'BUSTED! +') + pts, 1.1);
   SFX.bust();
   spawnSuspect();
@@ -2203,9 +2202,9 @@ function update(dt){
       }
     }
     if(hit){
-      timeLeft -= hit.penalty;
+      fuel = clamp(fuel - hit.penalty, 0, 100);
       player.speed *= 0.3;
-      showBanner(hit.label+'! -'+hit.penalty+'s', 0.9);
+      showBanner(hit.label+'! -'+hit.penalty+' FUEL', 0.9);
       player.hazardCooldown = HAZARD_COOLDOWN;
       SFX.crash();
     }
@@ -2224,11 +2223,10 @@ function update(dt){
     bustSuspect('ram');
   }
 
-  timeLeft -= dt;
-  if(timeLeft <= 0 || (FUEL_ENABLED && fuel <= 0)){
+  if(fuel <= 0){
     gameState = 'over';
     Engine.update(0, 1, false, false);
-    showEndPanel(FUEL_ENABLED && fuel<=0 ? 'OUT OF FUEL' : "TIME'S UP");
+    showEndPanel('OUT OF FUEL');
   }
 
   bannerTimer -= dt;
@@ -2378,12 +2376,18 @@ function dayNightSample(p){
 // that are always sliding toward their next keyframe, never a hard switch,
 // so a shower rolls in and clears out gradually rather than snapping on.
 const WEATHER_LENGTH = 150; // seconds for one full clear -> cloudy -> rain -> clear lap
+// rain now passes through a real light-sprinkle plateau on the way up to a
+// full heavy downpour (and back down the same way) instead of one smooth
+// ramp between "none" and "0.9" — drawRain() reads distinct visual looks
+// off these bands (see RAIN_SPRINKLE/RAIN_DOWNPOUR below)
 const WEATHER_KEYFRAMES = [
   { p:0.00, cloud:0.05, rain:0 },
   { p:0.18, cloud:0.15, rain:0 },
   { p:0.34, cloud:0.8,  rain:0 },
-  { p:0.48, cloud:0.95, rain:0.9 },
-  { p:0.66, cloud:0.85, rain:0.6 },
+  { p:0.42, cloud:0.88, rain:0.22 },
+  { p:0.50, cloud:0.95, rain:1.0 },
+  { p:0.62, cloud:0.9,  rain:0.9 },
+  { p:0.72, cloud:0.6,  rain:0.22 },
   { p:0.80, cloud:0.35, rain:0 },
   { p:0.94, cloud:0.1,  rain:0 },
   { p:1.00, cloud:0.05, rain:0 }
@@ -2445,8 +2449,18 @@ const CLUB_PALETTES = {dance:{colors:DISCO_COLORS, speed:4}, rock:{colors:ROCK_C
 // occasionally flipped by updateWindowFlicker for a lived-in feel) plus a
 // ground-floor door, laid directly onto one wall face. Party buildings
 // swap the lit/unlit scheme for a chasing disco cycle.
-function buildingWindows(b, faceAxis, constVal, lo, hi){
+// windows sit exactly in the same plane as their own wall face (no offset,
+// so there's nothing to nudge them in front of it with). A tall building's
+// window can be well over a hundred units away from the wall's own
+// vertical/horizontal center, and faceDepth sorts by full 3D distance —
+// that offset alone can make a window read as "farther" than its wall and
+// get painted over, flickering in and out as the camera angle shifts
+// during a turn. Pinning the window's sort depth to its wall's own depth
+// (minus a hair) settles the tie without disturbing how the window sorts
+// against everything else in the scene.
+function buildingWindows(b, faceAxis, constVal, lo, hi, wallDepth){
   const quads = [];
+  const depthOverride = wallDepth - 1;
   const span = hi - lo;
   const inset = 16;
   const usable = span - inset*2;
@@ -2471,13 +2485,13 @@ function buildingWindows(b, faceAxis, constVal, lo, hi){
           const lit = row && row[c];
           color = lit ? 'rgba(232,202,120,0.92)' : 'rgba(52,58,64,0.9)';
         }
-        quads.push({pts: facePlanePts(faceAxis, constVal, pos, pos+ww, y0, y1), color});
+        quads.push({pts: facePlanePts(faceAxis, constVal, pos, pos+ww, y0, y1), color, depthOverride});
       }
     }
   }
   const doorW = 12, doorH = 21;
   const doorPos = lo + span/2 - doorW/2;
-  quads.push({pts: facePlanePts(faceAxis, constVal, doorPos, doorPos+doorW, 0, doorH), color:'rgba(38,34,32,0.95)'});
+  quads.push({pts: facePlanePts(faceAxis, constVal, doorPos, doorPos+doorW, 0, doorH), color:'rgba(38,34,32,0.95)', depthOverride});
   return quads;
 }
 
@@ -2502,18 +2516,22 @@ function buildingFaces(b, cam, near){
   const tint = b.tint;
   // side facing camera on x axis
   if(cam.x < b.x1){
-    faces.push({pts:[[b.x1,0,b.z1],[b.x1,b.h,b.z1],[b.x1,b.h,b.z2],[b.x1,0,b.z2]], color: shadeColor(tint, b.shade*0.85)});
-    if(near) faces.push(...buildingWindows(b, 'x', b.x1, b.z1, b.z2));
+    const pts = [[b.x1,0,b.z1],[b.x1,b.h,b.z1],[b.x1,b.h,b.z2],[b.x1,0,b.z2]];
+    faces.push({pts, color: shadeColor(tint, b.shade*0.85)});
+    if(near) faces.push(...buildingWindows(b, 'x', b.x1, b.z1, b.z2, faceDepth(pts, cam)));
   } else if(cam.x > b.x2){
-    faces.push({pts:[[b.x2,0,b.z2],[b.x2,b.h,b.z2],[b.x2,b.h,b.z1],[b.x2,0,b.z1]], color: shadeColor(tint, b.shade*0.85)});
-    if(near) faces.push(...buildingWindows(b, 'x', b.x2, b.z1, b.z2));
+    const pts = [[b.x2,0,b.z2],[b.x2,b.h,b.z2],[b.x2,b.h,b.z1],[b.x2,0,b.z1]];
+    faces.push({pts, color: shadeColor(tint, b.shade*0.85)});
+    if(near) faces.push(...buildingWindows(b, 'x', b.x2, b.z1, b.z2, faceDepth(pts, cam)));
   }
   if(cam.z < b.z1){
-    faces.push({pts:[[b.x2,0,b.z1],[b.x2,b.h,b.z1],[b.x1,b.h,b.z1],[b.x1,0,b.z1]], color: shadeColor(tint, b.shade*1.05)});
-    if(near) faces.push(...buildingWindows(b, 'z', b.z1, b.x1, b.x2));
+    const pts = [[b.x2,0,b.z1],[b.x2,b.h,b.z1],[b.x1,b.h,b.z1],[b.x1,0,b.z1]];
+    faces.push({pts, color: shadeColor(tint, b.shade*1.05)});
+    if(near) faces.push(...buildingWindows(b, 'z', b.z1, b.x1, b.x2, faceDepth(pts, cam)));
   } else if(cam.z > b.z2){
-    faces.push({pts:[[b.x1,0,b.z2],[b.x1,b.h,b.z2],[b.x2,b.h,b.z2],[b.x2,0,b.z2]], color: shadeColor(tint, b.shade*1.05)});
-    if(near) faces.push(...buildingWindows(b, 'z', b.z2, b.x1, b.x2));
+    const pts = [[b.x1,0,b.z2],[b.x1,b.h,b.z2],[b.x2,b.h,b.z2],[b.x2,0,b.z2]];
+    faces.push({pts, color: shadeColor(tint, b.shade*1.05)});
+    if(near) faces.push(...buildingWindows(b, 'z', b.z2, b.x1, b.x2, faceDepth(pts, cam)));
   }
   if(cam.y < b.h){
     faces.push({pts:[[b.x1,b.h,b.z1],[b.x2,b.h,b.z1],[b.x2,b.h,b.z2],[b.x1,b.h,b.z2]], color: shadeColor(tint, b.shade*1.15)});
@@ -3772,15 +3790,24 @@ function drawClouds(){
 
 // falling rain streaks as a screen-space overlay — deterministic per-index
 // positions animated by dayClock (never resets, so the fall is continuous
-// across restarts the same way the sky is), rather than any particle state
+// across restarts the same way the sky is), rather than any particle state.
+// A light sprinkle and a heavy downpour read as genuinely different weather
+// rather than just "more of the same dots": a sprinkle is a handful of
+// faint, near-vertical, slow drops, while a downpour is dense, fast,
+// wind-slanted streaks plus a hazy grey wash over distant buildings.
 function drawRain(){
   if(raininess < 0.03) return;
   const alpha = clamp(raininess, 0, 1);
+  // eases in slower than it eases toward "heavy" so the sprinkle band
+  // (low alpha) actually lingers instead of rushing through
+  const heavy = alpha*alpha;
   ctx.save();
-  ctx.strokeStyle = `rgba(200,215,230,${(0.35*alpha).toFixed(3)})`;
-  ctx.lineWidth = 1;
-  const n = Math.round(50*alpha);
-  const fallSpeed = 900;
+  ctx.strokeStyle = `rgba(200,215,230,${(0.18 + 0.4*heavy).toFixed(3)})`;
+  ctx.lineWidth = 1 + heavy;
+  const n = Math.round(14 + 90*heavy);
+  const fallSpeed = 500 + 900*heavy;
+  const slant = 1 + 5*heavy;
+  const streakLen = 7 + 16*heavy;
   for(let i=0;i<n;i++){
     const seedX = (i*97) % (W+40) - 20;
     const seedY = (i*53) % (H+40);
@@ -3788,8 +3815,18 @@ function drawRain(){
     const x = (seedX + y*0.15) % (W+40);
     ctx.beginPath();
     ctx.moveTo(x, y);
-    ctx.lineTo(x-3, y+14);
+    ctx.lineTo(x-slant, y+streakLen);
     ctx.stroke();
+  }
+  if(heavy > 0.3){
+    // heavy downpour fogs out the distance — a soft grey wash from the
+    // horizon down, strongest right at peak intensity
+    const hazeT = clamp((heavy-0.3)/0.7, 0, 1);
+    const hazeGrad = ctx.createLinearGradient(0, HORIZON_Y-60, 0, HORIZON_Y+140);
+    hazeGrad.addColorStop(0, `rgba(170,178,188,${(0.28*hazeT).toFixed(3)})`);
+    hazeGrad.addColorStop(1, 'rgba(170,178,188,0)');
+    ctx.fillStyle = hazeGrad;
+    ctx.fillRect(0, HORIZON_Y-60, W, 200);
   }
   ctx.restore();
 }
@@ -3916,7 +3953,7 @@ function drawScene(){
     const d = dist2(cam.x,cam.z,bx,bz);
     if(d > RENDER_DIST*RENDER_DIST) continue;
     for(const f of buildingFaces(b, cam, d < nearDistSq)){
-      allFaces.push({pts:f.pts, color:f.color, stroke:buildingStroke, width:1.3, depth:faceDepth(f.pts, cam)});
+      allFaces.push({pts:f.pts, color:f.color, stroke:buildingStroke, width:1.3, depth: f.depthOverride !== undefined ? f.depthOverride : faceDepth(f.pts, cam)});
     }
   }
   for(const w of walls){
@@ -4270,7 +4307,6 @@ function updateHUD(){
     const revFrac = 0.08 + gearPos*0.92; // idle reading, never a dead zero at a stop
     drawDialGauge(document.getElementById('revDial'), revFrac, '#d9503a', 'REV');
   }
-  document.getElementById('hudTime').textContent = String(Math.max(0,Math.ceil(timeLeft)));
   document.getElementById('hudScore').textContent = score;
   document.getElementById('hudCaught').textContent = caught;
   if(FUEL_ENABLED){
@@ -4312,7 +4348,7 @@ motorbikes = [spawnStreetCar('#ff6a3d', 180, 'motorbike')];
 vans = [spawnStreetCar('#9aa08f', 80, 'van')];
 ebikes = [spawnStreetCar('#6fa070', 60, 'ebike')];
 civilians = [spawnStreetCar(CIVILIAN_COLORS[0], 110)];
-score = 0; caught = 0; timeLeft = START_TIME; fuel = START_FUEL;
+score = 0; caught = 0; fuel = START_FUEL;
 gameState = 'start';
 requestAnimationFrame(frame);
 
