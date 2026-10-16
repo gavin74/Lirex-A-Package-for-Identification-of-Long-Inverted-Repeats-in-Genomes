@@ -385,23 +385,30 @@ function generateCity(seed){
     }
   }
 
-  // sidewalks: a flat pavement strip hugging each curb, one segment per
-  // block so distance culling works the same as the road markings above
+  // sidewalks: a raised pavement strip hugging each curb, stopping well
+  // clear of every cross-street it runs alongside — same margin technique
+  // the dual-carriageway medians use, and for the same reason: a strip
+  // spanning the full block used to run straight through every
+  // intersection, overlapping the zebra crossings/traffic-light bases/
+  // medians sitting there and fighting with them for the same ground,
+  // which read as flickering debris in the middle of the road
   sidewalks = [];
-  const swWidth = 7;
+  const swWidth = 11, swMargin = ROAD_HALF + 8;
   for(const x of streetLinesX){
     for(let side of [-1,1]){
       const sx = x + side*(ROAD_HALF-swWidth/2-1);
-      for(let z=-worldHalfZ;z<worldHalfZ;z+=BLOCK){
-        sidewalks.push({x1:sx-swWidth/2, x2:sx+swWidth/2, z1:z, z2:z+BLOCK});
+      for(let i=0;i<BLOCKS_Z;i++){
+        const z1 = streetLinesZ[i]+swMargin, z2 = streetLinesZ[i+1]-swMargin;
+        if(z2>z1) sidewalks.push({x1:sx-swWidth/2, x2:sx+swWidth/2, z1, z2});
       }
     }
   }
   for(const z of streetLinesZ){
     for(let side of [-1,1]){
       const sz = z + side*(ROAD_HALF-swWidth/2-1);
-      for(let x=-worldHalfX;x<worldHalfX;x+=BLOCK){
-        sidewalks.push({x1:x, x2:x+BLOCK, z1:sz-swWidth/2, z2:sz+swWidth/2});
+      for(let i=0;i<BLOCKS_X;i++){
+        const x1 = streetLinesX[i]+swMargin, x2 = streetLinesX[i+1]-swMargin;
+        if(x2>x1) sidewalks.push({x1, x2, z1:sz-swWidth/2, z2:sz+swWidth/2});
       }
     }
   }
@@ -436,13 +443,12 @@ function generateCity(seed){
     donutPads.push(pad);
   }
 
-  // a couple of small collidable mini-roundabouts, UK style — a proof of
-  // concept more than a full traffic model: the player has to steer around
-  // them with the existing lane system, but AI traffic doesn't route
-  // around them yet, only straight through, so they're kept small and flag-gated
+  // small collidable mini-roundabouts, UK style — kept small since both the
+  // player and (now) AI traffic steer around them with a lateral nudge
+  // rather than a full give-way/circulate model
   roundabouts = [];
   if(ROUNDABOUTS_ENABLED){
-    for(const [ix,iz] of [[2,7],[7,2]]){
+    for(const [ix,iz] of [[2,7],[7,2],[2,2],[11,11],[7,10],[10,7]]){
       roundabouts.push({x:streetLinesX[ix], z:streetLinesZ[iz], r:6});
     }
   }
@@ -491,9 +497,10 @@ function generateCity(seed){
     });
   }
 
-  // a couple of midblock lane closures — collidable for the player, so a
-  // lane change is actually needed to get past; like the roundabout, AI
-  // traffic doesn't swerve around these yet
+  // a couple of midblock lane closures — collidable for the player, and
+  // now AI traffic swerves a lane over to clear them too (see
+  // roadworksAvoidOffset), the same lateral-nudge idiom used for the
+  // roundabouts below
   roadworks = [];
   const rwRnd = mulberry32(seed + 999);
   for(let k=0;k<Math.round(2*AREA_SCALE);k++){
@@ -509,6 +516,7 @@ function generateCity(seed){
     const zone = axis==='z'
       ? {x1:cross+laneCenter-9, x2:cross+laneCenter+9, z1:mid-len/2, z2:mid+len/2}
       : {x1:mid-len/2, x2:mid+len/2, z1:cross+laneCenter-9, z2:cross+laneCenter+9};
+    zone.axis = axis; zone.cross = cross; zone.mid = mid; zone.laneCenter = laneCenter; zone.halfLen = len/2;
     zone.cones = [];
     for(let c=0;c<4;c++){
       const t = c/3;
@@ -625,7 +633,7 @@ function nearestStreet(list, v){
 function makeCar(x,z,heading,color,maxSpeed){
   return {x,z,heading,targetHeading:heading,speed:0,color,maxSpeed,type:'car',
            axis:'z', dir:1, turnCooldown:0, alive:true,
-           lane:0, laneOffset:0, streetCoord:0,
+           lane:0, laneOffset:0, streetCoord:0, laneHome:x,
            signal:null, signalTimer:0, fleeing:false, spinout:0};
 }
 
@@ -751,8 +759,18 @@ function randomStreetPoint(){
   return {x,z};
 }
 
+// kept well clear of wherever the player currently is — without this,
+// traffic spawned at a fresh reset had a decent chance of landing right on
+// top of (or a half-second's drive from) the player's own starting spot,
+// reading as an unfair instant collision before the round even began
+const SPAWN_CLEAR_RADIUS = 160;
 function spawnStreetCar(color, speed, type){
-  const p = randomStreetPoint();
+  let p = randomStreetPoint();
+  let clearTries = 0;
+  while(player && dist2(p.x,p.z,player.x,player.z) < SPAWN_CLEAR_RADIUS*SPAWN_CLEAR_RADIUS && clearTries<20){
+    p = randomStreetPoint();
+    clearTries++;
+  }
   const c = makeCar(p.x, p.z, Math.random()<0.5?0:Math.PI, color, speed);
   c.speed = speed;  // AI traffic cruises at a constant speed, no accelerating
   c.type = type || 'car';
@@ -773,7 +791,8 @@ function spawnStreetCar(color, speed, type){
 // spawn and again every time it turns or reverses.
 function snapToLane(car, lineX, lineZ){
   const off = correctLane(car.axis, car.dir) * LANE_OFFSET;
-  if(car.axis==='z') car.x = lineX + off; else car.z = lineZ + off;
+  if(car.axis==='z'){ car.x = lineX + off; car.laneHome = car.x; }
+  else { car.z = lineZ + off; car.laneHome = car.z; }
 }
 
 function spawnSuspect(){
@@ -1542,6 +1561,52 @@ function checkOilSlick(car, dt){
   return false;
 }
 
+// a lateral nudge away from laneHome (the car's normal, correct-lane
+// position) so AI traffic actually steers around a roadworks closure or a
+// roundabout instead of driving straight through it — eased in and out
+// over a short look-ahead/look-past window rather than snapping, the same
+// smoothstep shape the day/night and weather keyframes already ease with
+function obstacleAvoidOffset(car){
+  const forward = car.axis==='z' ? car.z : car.x;
+  for(const rw of roadworks){
+    if(rw.axis !== car.axis) continue;
+    const sideOffset = car.laneHome - rw.cross;
+    if(Math.sign(sideOffset) !== Math.sign(rw.laneCenter)) continue;
+    if(Math.abs(sideOffset) > 25) continue;
+    const lookAhead = 45, lookPast = 12;
+    const zoneStart = rw.mid - rw.halfLen, zoneEnd = rw.mid + rw.halfLen;
+    const winStart = zoneStart - lookAhead, winEnd = zoneEnd + lookPast;
+    if(forward < winStart || forward > winEnd) continue;
+    const avoidAmount = -Math.sign(rw.laneCenter) * 22;
+    let t;
+    if(forward < zoneStart) t = smoothstep(clamp((forward-winStart)/lookAhead,0,1));
+    else if(forward > zoneEnd) t = smoothstep(clamp((winEnd-forward)/lookPast,0,1));
+    else t = 1;
+    return avoidAmount * t;
+  }
+  if(ROUNDABOUTS_ENABLED){
+    for(const rb of roundabouts){
+      const rbForward = car.axis==='z' ? rb.z : rb.x;
+      const rbCross = car.axis==='z' ? rb.x : rb.z;
+      const sideOffset = car.laneHome - rbCross;
+      const clearance = rb.r + 12;
+      if(Math.abs(sideOffset) > clearance + 20) continue;
+      const lookAhead = 30, lookPast = 15;
+      const winStart = rbForward - rb.r - lookAhead, winEnd = rbForward + rb.r + lookPast;
+      if(forward < winStart || forward > winEnd) continue;
+      const needed = clearance - Math.abs(sideOffset);
+      if(needed <= 0) continue;
+      const avoidAmount = Math.sign(sideOffset || 1) * needed;
+      let t;
+      if(forward < rbForward-rb.r) t = smoothstep(clamp((forward-winStart)/lookAhead,0,1));
+      else if(forward > rbForward+rb.r) t = smoothstep(clamp((winEnd-forward)/lookPast,0,1));
+      else t = 1;
+      return avoidAmount * t;
+    }
+  }
+  return 0;
+}
+
 function updateStreetCar(car, dt){
   if(checkOilSlick(car, dt)){ car.braking = true; return; }
   const exempt = car.fleeing || car.type==='ambulance' || car.type==='firetruck';
@@ -1555,6 +1620,9 @@ function updateStreetCar(car, dt){
 
   if(car.axis==='z') car.z += car.dir*car.speed*honkMul*dt;
   else car.x += car.dir*car.speed*honkMul*dt;
+  const avoid = obstacleAvoidOffset(car);
+  if(car.axis==='z') car.x = car.laneHome + avoid;
+  else car.z = car.laneHome + avoid;
 
   car.turnCooldown -= dt;
   const moving = car.axis==='z' ? car.z : car.x;
@@ -2274,6 +2342,10 @@ function rectBoxFaces(x1, x2, z1, z2, y0, y1, cam, sideColor, topColor){
 const MEDIAN_SIDE = 'rgb(150,148,138)', MEDIAN_TOP = 'rgb(120,165,95)';
 function buildMedianQuads(m, cam){
   return rectBoxFaces(m.x1, m.x2, m.z1, m.z2, 0, 2.2, cam, MEDIAN_SIDE, MEDIAN_TOP);
+}
+const SIDEWALK_SIDE = 'rgb(140,136,128)', SIDEWALK_TOP = 'rgb(182,177,165)';
+function buildSidewalkQuads(sw, cam){
+  return rectBoxFaces(sw.x1, sw.x2, sw.z1, sw.z2, 0, 1.6, cam, SIDEWALK_SIDE, SIDEWALK_TOP);
 }
 
 // A perimeter wall segment — same box shape as a building, one plain
@@ -3553,16 +3625,6 @@ function drawScene(){
     if(proj) polyFill(proj, 'rgba(250,228,236,0.7)', null);
   }
 
-  // sidewalks — flat pavement strips along every curb, same treatment as
-  // the road markings and zebra crossings below
-  for(const sw of sidewalks){
-    const mx=(sw.x1+sw.x2)/2, mz=(sw.z1+sw.z2)/2;
-    if(dist2(cam.x,cam.z,mx,mz) > markRangeSq) continue;
-    const pts = [[sw.x1,0.12,sw.z1],[sw.x2,0.12,sw.z1],[sw.x2,0.12,sw.z2],[sw.x1,0.12,sw.z2]];
-    const proj = projectFace(pts, cam);
-    if(proj) polyFill(proj, 'rgba(168,163,152,0.6)', null);
-  }
-
   // zebra crossings — flat ground decals like the road markings above
   for(const cr of crossings){
     if(dist2(cam.x,cam.z,cr.x,cr.z) > markRangeSq) continue;
@@ -3720,6 +3782,14 @@ function drawScene(){
     if(d > RENDER_DIST*RENDER_DIST) continue;
     for(const f of buildMedianQuads(m, cam)){
       allFaces.push({pts:f.pts, color:f.color, stroke:'rgba(15,15,17,0.6)', width:1, depth:faceDepth(f.pts, cam)});
+    }
+  }
+  for(const sw of sidewalks){
+    const mx=(sw.x1+sw.x2)/2, mz=(sw.z1+sw.z2)/2;
+    const d = dist2(cam.x,cam.z,mx,mz);
+    if(d > markRangeSq) continue;
+    for(const f of buildSidewalkQuads(sw, cam)){
+      allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
     }
   }
   for(const p of pedestrianPositions()){
