@@ -60,9 +60,6 @@
   }
   .row{display:flex;justify-content:space-between;gap:10px;margin:2px 0}
   .label{color:var(--dim);font-size:11px}
-  .bar{width:100px;height:8px;background:#111;border:1px solid #444;margin-top:2px}
-  .bar > i{display:block;height:100%;background:var(--good)}
-  #fuelbar.low > i{background:var(--bad)}
   #minimap{border:1px solid var(--panel-edge);background:rgba(8,9,10,.76)}
   .dialRow{display:flex;gap:6px}
   .dialRow canvas{background:rgba(8,9,10,.5);border-radius:50%}
@@ -116,10 +113,7 @@
         <div class="dialRow">
           <canvas id="speedDial" width="76" height="76"></canvas>
           <canvas id="revDial" width="76" height="76"></canvas>
-        </div>
-        <div id="fuelWrap">
-          <div class="row"><span class="label">FUEL</span></div>
-          <div id="fuelbar" class="bar"><i style="width:100%"></i></div>
+          <canvas id="fuelDial" width="76" height="76"></canvas>
         </div>
       </div>
       <canvas id="minimap" width="140" height="140"></canvas>
@@ -209,13 +203,13 @@ const TURN_RATE = 3.6;             // rad/sec every car's visual heading animate
                                     // instead of snapping/blinking into the new heading
 const JUNCTION_WINDOW = 70;        // how close to a crossing a turn can be started —
                                     // wide on purpose, turning was too easy to miss
-const FUEL_ENABLED = false;        // fuel management is parked for now
+const FUEL_ENABLED = true;         // gas stations now actually matter — find one before the tank runs dry
 const ROUNDABOUTS_ENABLED = true;  // experimental, flag-gated per request — a small
                                     // collidable island the player must steer around
                                     // using the existing lane system; AI traffic
                                     // doesn't route around it yet, only the player
 const ROAD_HALF = (BLOCK - BUILD_HALF*2) / 2; // half-width of the drivable gap between buildings
-const TL_CYCLE = 7, TL_AMBER = 1.2, TL_GAP = 1.0; // traffic-light phase timing (seconds)
+const TL_CYCLE = 7, TL_AMBER = 1.2, TL_GAP = 1.5; // traffic-light phase timing (seconds) — TL_GAP also doubles as the red-amber duration
 const TL_STOP_WINDOW = 26;         // how far ahead of a red/amber light traffic stops
 const SIGN_TYPES = ['stop','give_way','speed','direction'];
 const BILLBOARD_SLOGANS = [
@@ -269,6 +263,7 @@ let buildings = [];   // {x1,x2,z1,z2,h,shade}
 let gasPads = [];     // {x,z,r}
 let donutPads = [];   // same shape as gasPads, recoloured — see spawnDonutBreak
 let roadMarks = [];   // {x1,x2,z1,z2} dashed centerline segments
+let stopLines = [];   // {x1,x2,z1,z2} solid stop-line markings, one per approach to a signalled junction
 let walls = [];        // perimeter wall segments, same shape as a building box
 let roundabouts = [];  // {x,z,r} — see ROUNDABOUTS_ENABLED
 let trafficLights = [];// {x,z}
@@ -475,6 +470,24 @@ function generateCity(seed){
   trafficLights = [];
   for(const ix of [2,4,6]) for(const iz of [2,4,6]){
     trafficLights.push({x:streetLinesX[ix], z:streetLinesZ[iz]});
+  }
+
+  // a solid stop line on each of the 4 approaches to every signalled
+  // junction, right at the edge of the junction box — spans from the
+  // centerline to the near curb on the correct (left-hand-drive) side,
+  // not the full road, so it doesn't run across the oncoming lane too
+  stopLines = [];
+  const stopLineW = 2.5;
+  for(const tl of trafficLights){
+    for(const [axis,dir] of [['z',1],['z',-1],['x',1],['x',-1]]){
+      const laneSign = correctLane(axis, dir);
+      const stopAt = (axis==='z'?tl.z:tl.x) - dir*ROAD_HALF;
+      const crossCenter = axis==='z' ? tl.x : tl.z;
+      const crossFar = crossCenter + laneSign*ROAD_HALF;
+      const c1 = Math.min(crossCenter, crossFar), c2 = Math.max(crossCenter, crossFar);
+      if(axis==='z') stopLines.push({x1:c1, x2:c2, z1:stopAt-stopLineW/2, z2:stopAt+stopLineW/2});
+      else stopLines.push({x1:stopAt-stopLineW/2, x2:stopAt+stopLineW/2, z1:c1, z2:c2});
+    }
   }
 
   // shared by crossings/signs/clocks below: a modest offset off a street's
@@ -921,7 +934,7 @@ window.addEventListener('keydown', e=>{
 });
 window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
 
-if(!FUEL_ENABLED) document.getElementById('fuelWrap').style.display = 'none';
+if(!FUEL_ENABLED) document.getElementById('fuelDial').style.display = 'none';
 
 document.getElementById('btnStart').addEventListener('click', startGame);
 document.getElementById('wrap').addEventListener('click', ()=>{ if(gameState==='start') startGame(); });
@@ -1979,18 +1992,22 @@ function checkPlayerViolations(dt){
   }
 }
 
-// UK-style complementary phases: z-axis (NS) green, then amber, then an
-// all-red safety gap, then x-axis (EW) gets the same — amber means stop,
-// same as red, for AI purposes
+// the real UK sequence — red, red+amber, green, amber, red — not just a
+// red/green/amber cycle: the Highway Code's red-amber phase tells the
+// waiting direction to get ready, distinct from plain red. It fits in the
+// same slot the all-red safety gap already used (TL_GAP), so the handoff
+// stays safe: the outgoing axis is still plain red while the incoming one
+// shows red-amber, exactly the real pattern.
 function trafficPhase(axis, t){
   const half = TL_CYCLE + TL_GAP;
-  const p = ((t % (half*2)) + half*2) % (half*2);
+  const full = half*2;
+  const offset = axis==='z' ? 0 : half;
+  const rel = ((t - offset) % full + full) % full;
   const greenEnd = TL_CYCLE - TL_AMBER;
-  const local = axis==='z' ? p : p - half;
-  if(local < 0) return 'red';
-  if(local < greenEnd) return 'green';
-  if(local < TL_CYCLE) return 'amber';
-  return 'red';
+  if(rel < greenEnd) return 'green';
+  if(rel < TL_CYCLE) return 'amber';
+  if(rel < full - TL_GAP) return 'red';
+  return 'redamber';
 }
 
 function redLightAhead(car){
@@ -3291,24 +3308,34 @@ function trafficLightHeadQuads(px, pz, phase, axis, cam){
   const boxTop = h0+3*cell+2*gap+1, boxBot = h0-1;
   quads.push(...poleBoxFaces(px, pz, boxBot, boxTop, hw, cam, TL_HEAD_C));
   const greenY0=h0, amberY0=h0+(cell+gap), redY0=h0+2*(cell+gap);
-  const redColor = phase==='red'?TL_RED:TL_RED_DIM;
-  const amberColor = phase==='amber'?TL_AMBER_C:TL_AMBER_DIM;
+  // red-amber lights both the red and amber lamps together, same as a
+  // real UK signal in that phase
+  const redColor = (phase==='red'||phase==='redamber')?TL_RED:TL_RED_DIM;
+  const amberColor = (phase==='amber'||phase==='redamber')?TL_AMBER_C:TL_AMBER_DIM;
   const greenColor = phase==='green'?TL_GREEN:TL_GREEN_DIM;
+  // The lamp cells sit at very different heights within the head box (red
+  // near the top, green near the bottom). faceDepth sorts by full 3D
+  // distance to camera, so a lamp far above/below the camera's own height
+  // can read as "farther" than the box's own front face even though the
+  // lamp is physically nudged in front of it — the vertical offset alone
+  // can swamp a small z/x nudge. depthBias lets these lamp quads force
+  // themselves in front of their own head box regardless of camera height.
+  const LAMP_DEPTH_BIAS = -1200;
   if(axis==='z'){
     const lx0=px-hw+0.7, lx1=px+hw-0.7;
     // must clear the head box's own near face (at pz +/- hw), not just
     // nudge off its center, or the depth sort paints the box wall over
     // the lamp panel sitting behind it
     const faceZ = cam.z < pz ? pz-hw-0.3 : pz+hw+0.3;
-    quads.push({pts:[[lx0,redY0,faceZ],[lx0,redY0+cell,faceZ],[lx1,redY0+cell,faceZ],[lx1,redY0,faceZ]], color: redColor});
-    quads.push({pts:[[lx0,amberY0,faceZ],[lx0,amberY0+cell,faceZ],[lx1,amberY0+cell,faceZ],[lx1,amberY0,faceZ]], color: amberColor});
-    quads.push({pts:[[lx0,greenY0,faceZ],[lx0,greenY0+cell,faceZ],[lx1,greenY0+cell,faceZ],[lx1,greenY0,faceZ]], color: greenColor});
+    quads.push({pts:[[lx0,redY0,faceZ],[lx0,redY0+cell,faceZ],[lx1,redY0+cell,faceZ],[lx1,redY0,faceZ]], color: redColor, depthBias: LAMP_DEPTH_BIAS});
+    quads.push({pts:[[lx0,amberY0,faceZ],[lx0,amberY0+cell,faceZ],[lx1,amberY0+cell,faceZ],[lx1,amberY0,faceZ]], color: amberColor, depthBias: LAMP_DEPTH_BIAS});
+    quads.push({pts:[[lx0,greenY0,faceZ],[lx0,greenY0+cell,faceZ],[lx1,greenY0+cell,faceZ],[lx1,greenY0,faceZ]], color: greenColor, depthBias: LAMP_DEPTH_BIAS});
   } else {
     const lz0=pz-hw+0.7, lz1=pz+hw-0.7;
     const faceX = cam.x < px ? px-hw-0.3 : px+hw+0.3;
-    quads.push({pts:[[faceX,redY0,lz0],[faceX,redY0+cell,lz0],[faceX,redY0+cell,lz1],[faceX,redY0,lz1]], color: redColor});
-    quads.push({pts:[[faceX,amberY0,lz0],[faceX,amberY0+cell,lz0],[faceX,amberY0+cell,lz1],[faceX,amberY0,lz1]], color: amberColor});
-    quads.push({pts:[[faceX,greenY0,lz0],[faceX,greenY0+cell,lz0],[faceX,greenY0+cell,lz1],[faceX,greenY0,lz1]], color: greenColor});
+    quads.push({pts:[[faceX,redY0,lz0],[faceX,redY0+cell,lz0],[faceX,redY0+cell,lz1],[faceX,redY0,lz1]], color: redColor, depthBias: LAMP_DEPTH_BIAS});
+    quads.push({pts:[[faceX,amberY0,lz0],[faceX,amberY0+cell,lz0],[faceX,amberY0+cell,lz1],[faceX,amberY0,lz1]], color: amberColor, depthBias: LAMP_DEPTH_BIAS});
+    quads.push({pts:[[faceX,greenY0,lz0],[faceX,greenY0+cell,lz0],[faceX,greenY0+cell,lz1],[faceX,greenY0,lz1]], color: greenColor, depthBias: LAMP_DEPTH_BIAS});
   }
   return quads;
 }
@@ -3818,6 +3845,14 @@ function drawScene(){
     if(proj) polyFill(proj, 'rgba(224,222,208,0.8)', null);
   }
 
+  for(const sl of stopLines){
+    const mx=(sl.x1+sl.x2)/2, mz=(sl.z1+sl.z2)/2;
+    if(dist2(cam.x,cam.z,mx,mz) > markRangeSq) continue;
+    const pts = [[sl.x1,0.15,sl.z1],[sl.x2,0.15,sl.z1],[sl.x2,0.15,sl.z2],[sl.x1,0.15,sl.z2]];
+    const proj = projectFace(pts, cam);
+    if(proj) polyFill(proj, 'rgba(235,232,222,0.92)', null);
+  }
+
   for(const pad of donutPads){
     if(dist2(cam.x,cam.z,pad.x,pad.z) > RENDER_DIST*RENDER_DIST) continue;
     const pts = [[pad.x-30,0.2,pad.z-20],[pad.x+30,0.2,pad.z-20],[pad.x+30,0.2,pad.z+20],[pad.x-30,0.2,pad.z+20]];
@@ -3926,7 +3961,7 @@ function drawScene(){
     const d = dist2(cam.x,cam.z,tl.x,tl.z);
     if(d > RENDER_DIST*RENDER_DIST) continue;
     for(const f of buildTrafficLightQuads(tl, cam)){
-      allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
+      allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam) + (f.depthBias||0)});
     }
   }
   for(const cr of crossings){
@@ -4239,9 +4274,8 @@ function updateHUD(){
   document.getElementById('hudScore').textContent = score;
   document.getElementById('hudCaught').textContent = caught;
   if(FUEL_ENABLED){
-    const bar = document.getElementById('fuelbar');
-    bar.querySelector('i').style.width = clamp(fuel,0,100)+'%';
-    bar.classList.toggle('low', fuel < 25);
+    const fuelColor = fuel < 25 ? '#d9503a' : '#5fa8d9';
+    drawDialGauge(document.getElementById('fuelDial'), clamp(fuel,0,100)/100, fuelColor, 'FUEL');
   }
   const bm = document.getElementById('bannerMsg');
   bm.style.opacity = bannerTimer > 0 ? '1' : '0';
