@@ -2848,27 +2848,67 @@ const TL_AMBER_C='rgb(235,160,30)', TL_AMBER_DIM='rgb(95,72,32)';
 const TL_GREEN='rgb(60,205,95)', TL_GREEN_DIM='rgb(42,82,58)';
 const TL_POLE_C='rgb(62,64,68)', TL_HEAD_C='rgb(28,29,32)';
 
-function trafficLightHeadQuads(px, pz, phase){
+// a square box's visible side faces, chosen by camera position — same
+// convention buildingFaces uses — instead of a cheap crossed-plane
+// billboard that looks flat/paper-thin except from dead-on angles
+function poleBoxFaces(cx, cz, y0, y1, hw, cam, color){
+  const x1=cx-hw, x2=cx+hw, z1=cz-hw, z2=cz+hw;
+  const faces = [];
+  if(cam.x < x1) faces.push({pts:[[x1,y0,z1],[x1,y1,z1],[x1,y1,z2],[x1,y0,z2]], color});
+  else if(cam.x > x2) faces.push({pts:[[x2,y0,z2],[x2,y1,z2],[x2,y1,z1],[x2,y0,z1]], color});
+  if(cam.z < z1) faces.push({pts:[[x2,y0,z1],[x2,y1,z1],[x1,y1,z1],[x1,y0,z1]], color});
+  else if(cam.z > z2) faces.push({pts:[[x1,y0,z2],[x1,y1,z2],[x2,y1,z2],[x2,y0,z2]], color});
+  return faces;
+}
+// `axis` is which traffic this head's lamp panel is meant to be read by —
+// it used to always build a z-facing panel regardless of axis, so the
+// x-axis head was rotated 90 degrees from how it needed to face: traffic
+// on one axis could end up looking straight at the OTHER axis's phase
+// instead of its own, reading a flatly wrong light as if it were valid.
+function trafficLightHeadQuads(px, pz, phase, axis, cam){
   const quads = [];
   const poleH = 38;
-  quads.push({pts:[[px-1.2,0,pz],[px-1.2,poleH,pz],[px+1.2,poleH,pz],[px+1.2,0,pz]], color:TL_POLE_C});
-  quads.push({pts:[[px,0,pz-1.2],[px,poleH,pz-1.2],[px,poleH,pz+1.2],[px,0,pz+1.2]], color:TL_POLE_C});
+  quads.push(...poleBoxFaces(px, pz, 0, poleH, 1.2, cam, TL_POLE_C));
   const hw=3.2, h0=poleH-13, cell=3.6, gap=0.5;
-  quads.push({pts:[[px-hw,h0-1,pz],[px-hw,h0+3*cell+2*gap+1,pz],[px+hw,h0+3*cell+2*gap+1,pz],[px+hw,h0-1,pz]], color:TL_HEAD_C});
-  const lx0=px-hw+0.7, lx1=px+hw-0.7;
+  const boxTop = h0+3*cell+2*gap+1, boxBot = h0-1;
+  quads.push(...poleBoxFaces(px, pz, boxBot, boxTop, hw, cam, TL_HEAD_C));
   const greenY0=h0, amberY0=h0+(cell+gap), redY0=h0+2*(cell+gap);
-  quads.push({pts:[[lx0,redY0,pz-0.4],[lx0,redY0+cell,pz-0.4],[lx1,redY0+cell,pz-0.4],[lx1,redY0,pz-0.4]], color: phase==='red'?TL_RED:TL_RED_DIM});
-  quads.push({pts:[[lx0,amberY0,pz-0.4],[lx0,amberY0+cell,pz-0.4],[lx1,amberY0+cell,pz-0.4],[lx1,amberY0,pz-0.4]], color: phase==='amber'?TL_AMBER_C:TL_AMBER_DIM});
-  quads.push({pts:[[lx0,greenY0,pz-0.4],[lx0,greenY0+cell,pz-0.4],[lx1,greenY0+cell,pz-0.4],[lx1,greenY0,pz-0.4]], color: phase==='green'?TL_GREEN:TL_GREEN_DIM});
+  const redColor = phase==='red'?TL_RED:TL_RED_DIM;
+  const amberColor = phase==='amber'?TL_AMBER_C:TL_AMBER_DIM;
+  const greenColor = phase==='green'?TL_GREEN:TL_GREEN_DIM;
+  if(axis==='z'){
+    const lx0=px-hw+0.7, lx1=px+hw-0.7;
+    // must clear the head box's own near face (at pz +/- hw), not just
+    // nudge off its center, or the depth sort paints the box wall over
+    // the lamp panel sitting behind it
+    const faceZ = cam.z < pz ? pz-hw-0.3 : pz+hw+0.3;
+    quads.push({pts:[[lx0,redY0,faceZ],[lx0,redY0+cell,faceZ],[lx1,redY0+cell,faceZ],[lx1,redY0,faceZ]], color: redColor});
+    quads.push({pts:[[lx0,amberY0,faceZ],[lx0,amberY0+cell,faceZ],[lx1,amberY0+cell,faceZ],[lx1,amberY0,faceZ]], color: amberColor});
+    quads.push({pts:[[lx0,greenY0,faceZ],[lx0,greenY0+cell,faceZ],[lx1,greenY0+cell,faceZ],[lx1,greenY0,faceZ]], color: greenColor});
+  } else {
+    const lz0=pz-hw+0.7, lz1=pz+hw-0.7;
+    const faceX = cam.x < px ? px-hw-0.3 : px+hw+0.3;
+    quads.push({pts:[[faceX,redY0,lz0],[faceX,redY0+cell,lz0],[faceX,redY0+cell,lz1],[faceX,redY0,lz1]], color: redColor});
+    quads.push({pts:[[faceX,amberY0,lz0],[faceX,amberY0+cell,lz0],[faceX,amberY0+cell,lz1],[faceX,amberY0,lz1]], color: amberColor});
+    quads.push({pts:[[faceX,greenY0,lz0],[faceX,greenY0+cell,lz0],[faceX,greenY0+cell,lz1],[faceX,greenY0,lz1]], color: greenColor});
+  }
   return quads;
 }
-function buildTrafficLightQuads(tl){
+// one head per approach (all 4 corners), not just two diagonal corners —
+// with only two, a car approaching from the "wrong" diagonal had no head
+// anywhere near its own line of sight
+function buildTrafficLightQuads(tl, cam){
   const phaseZ = trafficPhase('z', worldTime), phaseX = trafficPhase('x', worldTime);
   // posts belong at the curb, not in the middle of the carriageway — this
   // was sitting well inside the road (offset 12, when the road itself is
   // ROAD_HALF=42 wide), effectively planted in the traffic lane
   const off = ROAD_HALF - 4;
-  return [...trafficLightHeadQuads(tl.x+off, tl.z-off, phaseZ), ...trafficLightHeadQuads(tl.x-off, tl.z+off, phaseX)];
+  return [
+    ...trafficLightHeadQuads(tl.x+off, tl.z-off, phaseZ, 'z', cam),
+    ...trafficLightHeadQuads(tl.x+off, tl.z+off, phaseZ, 'z', cam),
+    ...trafficLightHeadQuads(tl.x-off, tl.z+off, phaseX, 'x', cam),
+    ...trafficLightHeadQuads(tl.x-off, tl.z-off, phaseX, 'x', cam),
+  ];
 }
 
 function buildZebraQuads(sx, sz, axis){
@@ -3328,7 +3368,7 @@ function drawScene(){
   for(const tl of trafficLights){
     const d = dist2(cam.x,cam.z,tl.x,tl.z);
     if(d > RENDER_DIST*RENDER_DIST) continue;
-    for(const f of buildTrafficLightQuads(tl)){
+    for(const f of buildTrafficLightQuads(tl, cam)){
       allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
     }
   }
