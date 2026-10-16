@@ -2008,6 +2008,11 @@ function shadeColor(base, k){
 function lerp(a,b,t){ return a+(b-a)*t; }
 function lerpColor3(c1,c2,t){ return [lerp(c1[0],c2[0],t), lerp(c1[1],c2[1],t), lerp(c1[2],c2[2],t)]; }
 function rgbStr(c){ return `rgb(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])})`; }
+// eases a 0..1 segment fraction so it starts and ends at zero velocity —
+// used anywhere a keyframe cycle (day/night, weather) interpolates between
+// two stops, so arriving at and leaving each keyframe is gradual instead of
+// a sharp corner where one linear rate instantly swaps for the next.
+function smoothstep(t){ return t*t*(3-2*t); }
 
 // keyframes across one full cycle (p in [0,1)): dawn -> day -> dusk ->
 // (fast drop) -> night -> pre-dawn -> back to dawn
@@ -2026,20 +2031,63 @@ function dayNightSample(p){
     if(p >= DAY_KEYFRAMES[i].p && p <= DAY_KEYFRAMES[i+1].p){ a=DAY_KEYFRAMES[i]; b=DAY_KEYFRAMES[i+1]; break; }
   }
   const span = b.p - a.p;
-  const t = span > 0 ? (p - a.p)/span : 0;
+  const t = span > 0 ? smoothstep((p - a.p)/span) : 0;
   return {
     top: lerpColor3(a.top,b.top,t), bottom: lerpColor3(a.bottom,b.bottom,t),
     ground: lerpColor3(a.ground,b.ground,t), ambient: lerp(a.ambient,b.ambient,t)
   };
 }
 
+// Weather cycles independently of day/night, on its own clock, blending
+// continuously between clear/cloudy/rain via the same keyframe+ease shape
+// as the sky above — cloudiness and raininess are both 0..1 intensities
+// that are always sliding toward their next keyframe, never a hard switch,
+// so a shower rolls in and clears out gradually rather than snapping on.
+const WEATHER_LENGTH = 150; // seconds for one full clear -> cloudy -> rain -> clear lap
+const WEATHER_KEYFRAMES = [
+  { p:0.00, cloud:0.05, rain:0 },
+  { p:0.18, cloud:0.15, rain:0 },
+  { p:0.34, cloud:0.8,  rain:0 },
+  { p:0.48, cloud:0.95, rain:0.9 },
+  { p:0.66, cloud:0.85, rain:0.6 },
+  { p:0.80, cloud:0.35, rain:0 },
+  { p:0.94, cloud:0.1,  rain:0 },
+  { p:1.00, cloud:0.05, rain:0 }
+];
+function weatherSample(p){
+  let a = WEATHER_KEYFRAMES[0], b = WEATHER_KEYFRAMES[WEATHER_KEYFRAMES.length-1];
+  for(let i=0;i<WEATHER_KEYFRAMES.length-1;i++){
+    if(p >= WEATHER_KEYFRAMES[i].p && p <= WEATHER_KEYFRAMES[i+1].p){ a=WEATHER_KEYFRAMES[i]; b=WEATHER_KEYFRAMES[i+1]; break; }
+  }
+  const span = b.p - a.p;
+  const t = span > 0 ? smoothstep((p - a.p)/span) : 0;
+  return { cloud: lerp(a.cloud,b.cloud,t), rain: lerp(a.rain,b.rain,t) };
+}
+let weatherClock = 0;
+let cloudiness = 0.05, raininess = 0;
+function updateWeather(dt){
+  weatherClock += dt;
+  const p = (weatherClock % WEATHER_LENGTH) / WEATHER_LENGTH;
+  const s = weatherSample(p);
+  cloudiness = s.cloud; raininess = s.rain;
+}
+
 let dayClock = 0;
 let skyTop = [75,88,100], skyBottom = [124,136,148], groundColor = [74,76,79];
+const OVERCAST_TOP = [96,98,104], OVERCAST_BOTTOM = [118,119,124], OVERCAST_GROUND = [58,59,62];
 function updateDayNight(dt){
   dayClock += dt;
   const p = (dayClock % DAY_LENGTH) / DAY_LENGTH;
   const s = dayNightSample(p);
-  skyTop = s.top; skyBottom = s.bottom; groundColor = s.ground; dayAmbient = s.ambient;
+  // an overcast or rainy sky greys out and flattens toward a fixed overcast
+  // palette, and dims ambient a bit further on top of whatever the time of
+  // day already calls for — layered on the day/night sample, not instead
+  // of it, so weather never cancels the actual time of day
+  const overcastT = cloudiness*0.8;
+  skyTop = lerpColor3(s.top, OVERCAST_TOP, overcastT);
+  skyBottom = lerpColor3(s.bottom, OVERCAST_BOTTOM, overcastT);
+  groundColor = lerpColor3(s.ground, OVERCAST_GROUND, overcastT*0.6);
+  dayAmbient = s.ambient * (1 - cloudiness*0.18 - raininess*0.12);
 }
 
 // Builds the 4 corners of a vertical rectangle lying in a face's plane —
@@ -3262,6 +3310,57 @@ function buildHelicopterQuads(h){
   return quads;
 }
 
+// simple drifting cloud blobs in screen space, drawn flat into the sky
+// band before anything 3D — buildings painted afterward naturally occlude
+// them wherever a roofline reaches into the sky, with no extra bookkeeping
+function drawClouds(){
+  if(cloudiness < 0.03) return;
+  const alpha = clamp(cloudiness, 0, 1);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0,0,W,HORIZON_Y);
+  ctx.clip();
+  ctx.fillStyle = `rgba(235,235,240,${(0.5*alpha).toFixed(3)})`;
+  const n = 6;
+  for(let i=0;i<n;i++){
+    const speed = 6 + (i%3)*3;
+    const baseX = (i/n)*(W+300) - 150;
+    const x = ((baseX + dayClock*speed) % (W+300)) - 150;
+    const y = 20 + (i*37 % 90);
+    const r = 26 + (i*19 % 30);
+    ctx.beginPath();
+    ctx.ellipse(x, y, r*1.6, r*0.6, 0, 0, Math.PI*2);
+    ctx.ellipse(x+r*0.9, y+r*0.15, r*1.1, r*0.5, 0, 0, Math.PI*2);
+    ctx.ellipse(x-r*0.8, y+r*0.1, r, r*0.45, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// falling rain streaks as a screen-space overlay — deterministic per-index
+// positions animated by dayClock (never resets, so the fall is continuous
+// across restarts the same way the sky is), rather than any particle state
+function drawRain(){
+  if(raininess < 0.03) return;
+  const alpha = clamp(raininess, 0, 1);
+  ctx.save();
+  ctx.strokeStyle = `rgba(200,215,230,${(0.35*alpha).toFixed(3)})`;
+  ctx.lineWidth = 1;
+  const n = Math.round(50*alpha);
+  const fallSpeed = 900;
+  for(let i=0;i<n;i++){
+    const seedX = (i*97) % (W+40) - 20;
+    const seedY = (i*53) % (H+40);
+    const y = (seedY + dayClock*fallSpeed) % (H+40) - 20;
+    const x = (seedX + y*0.15) % (W+40);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x-3, y+14);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawScene(){
   // sky
   const grad = ctx.createLinearGradient(0,0,0,HORIZON_Y);
@@ -3269,6 +3368,7 @@ function drawScene(){
   grad.addColorStop(1, rgbStr(skyBottom));
   ctx.fillStyle = grad;
   ctx.fillRect(0,0,W,HORIZON_Y);
+  drawClouds();
   // ground
   ctx.fillStyle = rgbStr(groundColor);
   ctx.fillRect(0,HORIZON_Y,W,H-HORIZON_Y);
@@ -3278,6 +3378,10 @@ function drawScene(){
   g2.addColorStop(1,'rgba(0,0,0,0)');
   ctx.fillStyle = g2;
   ctx.fillRect(0,HORIZON_Y,W,H-HORIZON_Y);
+  if(raininess > 0.02){
+    ctx.fillStyle = `rgba(40,55,75,${(0.18*raininess).toFixed(3)})`;
+    ctx.fillRect(0,HORIZON_Y,W,H-HORIZON_Y);
+  }
 
   const shakeMag = shakeTimer > 0 ? 7 * (shakeTimer/SHAKE_DURATION) : 0;
   const cam = {
@@ -3548,6 +3652,8 @@ function drawScene(){
     ctx.fillText(bb.slogan, screen.x, screen.y);
     ctx.restore();
   }
+
+  drawRain();
 }
 
 // squared 3D distance from the camera to a face's centroid — used as the
@@ -3641,6 +3747,7 @@ let lastT = performance.now();
 function frame(t){
   const dt = Math.min(0.05, (t-lastT)/1000);
   lastT = t;
+  updateWeather(dt); // also keeps advancing on the start screen, same as day/night
   updateDayNight(dt); // keeps advancing even on the start screen, gameState aside
   update(dt);
   if(player){
