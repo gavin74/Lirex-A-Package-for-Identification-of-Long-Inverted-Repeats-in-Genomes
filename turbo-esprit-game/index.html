@@ -171,7 +171,7 @@
 // ---------------------------------------------------------------
 const BLOCKS_X = 13, BLOCKS_Z = 13;
 const AREA_SCALE = (BLOCKS_X*BLOCKS_Z) / 81; // decorative-density scalar, 1.0 at the original 9x9 size
-const BLOCK = 220;                 // grid spacing
+const BLOCK = 260;                 // grid spacing — wider blocks/roads, bigger map for the same block count
 const BUILD_HALF = 68;             // building footprint half-size (leaves street gaps)
 const RENDER_DIST = 1000;
 const NEAR = 4;
@@ -179,6 +179,21 @@ const FOV_FOCAL = 260;
 const HORIZON_Y = 205;
 const CAM_HEIGHT = 27;             // lower + closer than before — Turbo Esprit's chase cam
 const CAM_BACK = 23;               // showed much more of the car's own body
+// selectable chase-cam presets — cycled with 'v'. 'incar' hides the
+// player's own car model (see the allCars() render loop) since the camera
+// sits inside it, same as a real cockpit view would.
+const CAMERA_MODES = ['close', 'far', 'incar'];
+const CAMERA_PRESETS = {
+  close: { back: CAM_BACK, height: CAM_HEIGHT, pitch: -0.09 },
+  far:   { back: 46, height: 42, pitch: -0.15 },
+  incar: { back: 0, height: 16, pitch: -0.01 }
+};
+let cameraMode = 'close';
+function cycleCameraMode(){
+  const i = CAMERA_MODES.indexOf(cameraMode);
+  cameraMode = CAMERA_MODES[(i+1)%CAMERA_MODES.length];
+  showBanner('VIEW: ' + cameraMode.toUpperCase(), 0.9);
+}
 const CATCH_RADIUS = 24;
 const START_TIME = 110;
 const CATCH_BONUS_TIME = 18;
@@ -466,35 +481,47 @@ function generateCity(seed){
     crossings.push({x:tl.x-30, z:tl.z, axis:'x'});
   }
 
-  // scattered road signs — purely decorative street furniture. Offset by
-  // the curb distance (not a small fixed number less than it), or they
-  // land out in the traffic lanes same as the traffic lights did.
+  // scattered road signs — purely decorative street furniture, placed
+  // beside ONE street at a point along a single block, clear of both
+  // bounding intersections. Picking two independent intersection indices
+  // (one per axis) and offsetting both put these inside the junction box
+  // itself — on the pavement of whichever street crossed there, not past
+  // the curb of either — which read as signs standing in the middle of
+  // the road.
   signs = [];
   const signRnd = mulberry32(seed + 777);
   const curbOff = ROAD_HALF - 4;
+  const furnitureMargin = ROAD_HALF + 10;
   for(let k=0;k<Math.round(14*AREA_SCALE);k++){
-    const ix = 1 + Math.floor(signRnd()*(streetLinesX.length-2));
-    const iz = 1 + Math.floor(signRnd()*(streetLinesZ.length-2));
-    signs.push({
-      x: streetLinesX[ix] + (signRnd()<0.5?-curbOff:curbOff),
-      z: streetLinesZ[iz] + (signRnd()<0.5?-curbOff:curbOff),
-      type: SIGN_TYPES[Math.floor(signRnd()*SIGN_TYPES.length)]
-    });
+    const axis = signRnd()<0.5 ? 'z' : 'x';
+    const lines = axis==='z' ? streetLinesX : streetLinesZ;
+    const crossLines = axis==='z' ? streetLinesZ : streetLinesX;
+    const line = lines[Math.floor(signRnd()*lines.length)];
+    const ci = Math.floor(signRnd()*(crossLines.length-1));
+    const blockStart = crossLines[ci]+furnitureMargin, blockEnd = crossLines[ci+1]-furnitureMargin;
+    const along = blockStart + signRnd()*(blockEnd-blockStart);
+    const cross = line + (signRnd()<0.5?-curbOff:curbOff);
+    const pos = axis==='z' ? {x:cross, z:along} : {x:along, z:cross};
+    signs.push({x:pos.x, z:pos.z, type: SIGN_TYPES[Math.floor(signRnd()*SIGN_TYPES.length)]});
   }
 
   // a handful of street clock towers, hands driven by the actual in-game
-  // time of day rather than any state of their own
+  // time of day rather than any state of their own — same single-street,
+  // mid-block placement as the signs above, for the same reason
   clocks = [];
   const clockRnd = mulberry32(seed + 3030);
   const clockFacings = [0, Math.PI/2, Math.PI, -Math.PI/2];
   for(let k=0;k<4;k++){
-    const ix = 1 + Math.floor(clockRnd()*(streetLinesX.length-2));
-    const iz = 1 + Math.floor(clockRnd()*(streetLinesZ.length-2));
-    clocks.push({
-      x: streetLinesX[ix] + (clockRnd()<0.5?-curbOff:curbOff),
-      z: streetLinesZ[iz] + (clockRnd()<0.5?-curbOff:curbOff),
-      facing: clockFacings[Math.floor(clockRnd()*clockFacings.length)]
-    });
+    const axis = clockRnd()<0.5 ? 'z' : 'x';
+    const lines = axis==='z' ? streetLinesX : streetLinesZ;
+    const crossLines = axis==='z' ? streetLinesZ : streetLinesX;
+    const line = lines[Math.floor(clockRnd()*lines.length)];
+    const ci = Math.floor(clockRnd()*(crossLines.length-1));
+    const blockStart = crossLines[ci]+furnitureMargin, blockEnd = crossLines[ci+1]-furnitureMargin;
+    const along = blockStart + clockRnd()*(blockEnd-blockStart);
+    const cross = line + (clockRnd()<0.5?-curbOff:curbOff);
+    const pos = axis==='z' ? {x:cross, z:along} : {x:along, z:cross};
+    clocks.push({x:pos.x, z:pos.z, facing: clockFacings[Math.floor(clockRnd()*clockFacings.length)]});
   }
 
   // a couple of midblock lane closures — collidable for the player, and
@@ -569,8 +596,8 @@ function generateCity(seed){
     const range = ow.axis==='z' ? worldHalfZ : worldHalfX;
     const wallSign = ow.line < 0 ? -1 : 1;
     const curbCross = ow.line - wallSign*curbOff;
-    for(let k=-1;k<=1;k++){
-      const along = k*range*0.6;
+    for(let k=-2;k<=2;k++){
+      const along = k*range*0.4;
       const pos = ow.axis==='z' ? {x:curbCross, z:along} : {x:along, z:curbCross};
       oneWaySigns.push({x:pos.x, z:pos.z, axis:ow.axis, dir:ow.dir});
     }
@@ -697,6 +724,11 @@ function spawnPlayerStart(){
   car.pendingTurn = null;
   car.streetCoord = x;
   car.lane = 1;
+  // without this the car spawns dead-center on the street (laneOffset
+  // defaults to 0) and visibly slides into lane 1 over the first half
+  // second, before the player has touched a key
+  car.laneOffset = LANE_OFFSET;
+  car.x = x + LANE_OFFSET;
   return car;
 }
 
@@ -710,6 +742,7 @@ function resetGame(){
   bullets = [];
   oilSlicks = [];
   wantedTimer = 0;
+  SFX.sirenStop();
   player.violateCooldown = 0;
   suspect = null;
   police = [];
@@ -849,6 +882,7 @@ window.addEventListener('keydown', e=>{
   if((k==='e') && !e.repeat) queueTurn('right');
   if(k===' ' && !e.repeat) fireGun();
   if(k==='o' && !e.repeat) dropOilSlick();
+  if(k==='v' && !e.repeat) cycleCameraMode();
   if(k==='h' && !e.repeat) honk();
   if(k==='t' && !e.repeat) cycleRadio();
   if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k)) e.preventDefault();
@@ -1162,7 +1196,39 @@ const SFX = (function(){
     noise.start(now);
   }
 
-  return { crash, bust, gunshot, horn, screech };
+  // a continuous two-tone wail (an LFO modulating the siren oscillator's
+  // own frequency) rather than a one-shot like the other SFX here — started
+  // once when the player goes WANTED and stopped once the heat clears,
+  // not re-triggered every frame while already running
+  let sirenOsc = null, sirenLfo = null, sirenGain = null, sirenActive = false;
+  function sirenStart(){
+    const ac = ctx();
+    if(!ac || Engine.isMuted || sirenActive) return;
+    sirenActive = true;
+    const now = ac.currentTime;
+    sirenOsc = ac.createOscillator(); sirenOsc.type = 'sine';
+    sirenOsc.frequency.value = 760;
+    sirenGain = ac.createGain();
+    sirenGain.gain.setValueAtTime(0.0001, now);
+    sirenGain.gain.linearRampToValueAtTime(0.12, now+0.15);
+    sirenLfo = ac.createOscillator(); sirenLfo.type = 'sine'; sirenLfo.frequency.value = 0.7;
+    const lfoGain = ac.createGain(); lfoGain.gain.value = 180;
+    sirenLfo.connect(lfoGain); lfoGain.connect(sirenOsc.frequency);
+    sirenOsc.connect(sirenGain); sirenGain.connect(ac.destination);
+    sirenOsc.start(now); sirenLfo.start(now);
+  }
+  function sirenStop(){
+    const ac = ctx();
+    if(!sirenActive) return;
+    sirenActive = false;
+    const now = ac ? ac.currentTime : 0;
+    if(ac && sirenGain) sirenGain.gain.setTargetAtTime(0, now, 0.15);
+    if(sirenOsc){ try{ sirenOsc.stop(now+0.3); }catch(e){} }
+    if(sirenLfo){ try{ sirenLfo.stop(now+0.3); }catch(e){} }
+    sirenOsc = null; sirenLfo = null; sirenGain = null;
+  }
+
+  return { crash, bust, gunshot, horn, screech, sirenStart, sirenStop };
 })();
 
 // ---------------------------------------------------------------
@@ -1400,13 +1466,14 @@ function updatePlayer(dt){
   player.gunCooldown -= dt;
   player.oilCooldown -= dt;
 
-  // slide toward the target lane at a fixed rate, then drive straight
-  // down the current street at that lane offset
+  // ease toward the target lane (exponential approach, fast at first and
+  // slowing into place) rather than a constant-speed slide that just snaps
+  // the instant it arrives — reads as a much smoother lane change
   const targetOffset = player.lane * LANE_OFFSET;
-  const maxSlide = LANE_SPEED*dt;
   const prevLaneOffset = player.laneOffset;
-  if(Math.abs(targetOffset-player.laneOffset) <= maxSlide) player.laneOffset = targetOffset;
-  else player.laneOffset += Math.sign(targetOffset-player.laneOffset)*maxSlide;
+  const laneEase = 1 - Math.exp(-LANE_SPEED/LANE_OFFSET*dt);
+  player.laneOffset += (targetOffset - player.laneOffset) * laneEase;
+  if(Math.abs(targetOffset-player.laneOffset) < 0.05) player.laneOffset = targetOffset;
 
   // how far mid-turn the heading still has to catch up to its target —
   // used below to gate the lane-change yaw and to drive the cornering lean
@@ -1423,8 +1490,13 @@ function updatePlayer(dt){
   // to the new correct side the instant a turn fires, which used to spike
   // this yaw at the same moment approachHeading and the roll below were
   // also animating, reading as a jerky double-rotation.
+  // rotating by dir alone was only correct on z-axis streets — same
+  // rightSign rotation changeLane()/correctLane() already use, since a
+  // positive lane-offset change doesn't bank the nose the same way on an
+  // x-axis street as it does on a z-axis one
   const laneVel = dt > 0 ? (player.laneOffset - prevLaneOffset) / dt : 0;
-  const yaw = turningNow ? 0 : clamp(laneVel / LANE_SPEED, -1, 1) * 0.3 * player.dir;
+  const rightSign = player.dir * (player.axis==='z' ? 1 : -1);
+  const yaw = turningNow ? 0 : clamp(laneVel / LANE_SPEED, -1, 1) * 0.3 * rightSign;
   player.visualHeading = player.heading + yaw;
 
   // a corner taken at speed banks the car over — "two wheels" lean. Driven
@@ -1618,11 +1690,25 @@ function updateStreetCar(car, dt){
   if(car.honkTimer > 0) car.honkTimer -= dt;
   const honkMul = car.honkTimer > 0 ? 1.5 : 1;
 
-  if(car.axis==='z') car.z += car.dir*car.speed*honkMul*dt;
-  else car.x += car.dir*car.speed*honkMul*dt;
+  // the player already stops for traffic (collideWorld, in updatePlayer),
+  // but that's a one-way rule — traffic never checked for the player at
+  // all, so it drove straight through a stationary or oncoming car with
+  // nothing to stop it. Compute where this car is ABOUT to be and brake
+  // dead (same hard-stop idiom as a red light) if that would overlap the
+  // player, rather than committing the move and discovering it after.
   const avoid = obstacleAvoidOffset(car);
-  if(car.axis==='z') car.x = car.laneHome + avoid;
-  else car.z = car.laneHome + avoid;
+  const crossPos = car.laneHome + avoid;
+  const prospectiveForward = (car.axis==='z' ? car.z : car.x) + car.dir*car.speed*honkMul*dt;
+  const nx = car.axis==='z' ? crossPos : prospectiveForward;
+  const nz = car.axis==='z' ? prospectiveForward : crossPos;
+  const PLAYER_BLOCK_R = 17;
+  if(player && dist2(nx,nz,player.x,player.z) < PLAYER_BLOCK_R*PLAYER_BLOCK_R){
+    car.braking = true;
+    if(car.axis==='z') car.x = crossPos; else car.z = crossPos;
+    return;
+  }
+  if(car.axis==='z'){ car.z = prospectiveForward; car.x = crossPos; }
+  else { car.x = prospectiveForward; car.z = crossPos; }
 
   car.turnCooldown -= dt;
   const moving = car.axis==='z' ? car.z : car.x;
@@ -1726,12 +1812,13 @@ const WANTED_DURATION = 16, WANTED_CATCH_PENALTY = 8, WANTED_CHASE_RADIUS = 450;
 let wantedTimer = 0;
 
 function triggerWanted(reason){
-  if(wantedTimer <= 0) showBanner('WANTED! ' + reason, 1.3);
+  if(wantedTimer <= 0){ showBanner('WANTED! ' + reason, 1.3); SFX.sirenStart(); }
   wantedTimer = WANTED_DURATION;
 }
 
 function updateWantedState(dt){
   if(wantedTimer <= 0){
+    if(police.some(p=>p.chasing)) SFX.sirenStop();
     for(const p of police) if(p.chasing){ p.chasing = false; p.speed = p.maxSpeed; }
     return;
   }
@@ -1747,6 +1834,7 @@ function updateWantedState(dt){
       timeLeft -= WANTED_CATCH_PENALTY;
       showBanner('CAUGHT! -' + WANTED_CATCH_PENALTY + 's', 1.1);
       SFX.crash();
+      SFX.sirenStop();
       wantedTimer = 0;
       for(const pp of police){ pp.chasing = false; pp.speed = pp.maxSpeed; }
       break;
@@ -3272,25 +3360,38 @@ function buildSignQuads(sg){
   return quads;
 }
 
-// a big blue British-style "one way" plate — a tall rectangle with a
-// vertical white arrow, mounted facing oncoming traffic on the street's
-// own axis (face normal along the travel axis, same convention buildSignQuads
-// uses: the plane holds the cross-axis and height, never the travel axis)
+// a British-style "ONE WAY" plate — white background, black border, black
+// arrow, with "ONE WAY" text rendered as real canvas text in the post-pass
+// below (see the oneWaySigns loop in drawScene), mounted facing oncoming
+// traffic on the street's own axis (face normal along the travel axis,
+// same convention buildSignQuads uses: the plane holds the cross-axis and
+// height, never the travel axis)
 function buildOneWaySignQuads(sg){
   const quads = [];
   const poleH = 24, px = sg.x, pz = sg.z;
   quads.push({pts:[[px-1,0,pz],[px-1,poleH,pz],[px+1,poleH,pz],[px+1,0,pz]], color:'rgb(140,142,146)'});
   quads.push({pts:[[px,0,pz-1],[px,poleH,pz-1],[px,poleH,pz+1],[px,0,pz+1]], color:'rgb(140,142,146)'});
-  const cy = poleH+11, hw=6.5, hh=11;
-  const blue = 'rgb(20,70,150)', white = 'rgb(240,240,235)';
+  const cy = poleH+14, hw=8, hh=14;
+  const white = 'rgb(246,246,240)', black = 'rgb(20,20,22)';
+  // arrow sits in the upper two-thirds; the bottom third is left clear for
+  // the "ONE WAY" text painted on top in the post-pass
+  const shaftY0 = cy-2, shaftY1 = cy+hh-6, headY1 = cy+hh-1;
+  // the engine's painter's sort orders faces by full 3D centroid distance,
+  // not view-depth — for faces this close together, a tall/short quad's
+  // differing height skews that distance enough to beat a sub-1-unit z
+  // nudge, so the arrow (short, centered) could sort as "farther" than the
+  // panel (tall, spans the whole plate) and get painted first, then
+  // covered. A multi-unit offset keeps the z term dominant regardless.
   if(sg.axis==='z'){
-    quads.push({pts:[[px-hw,cy-hh,pz],[px-hw,cy+hh,pz],[px+hw,cy+hh,pz],[px+hw,cy-hh,pz]], color:blue});
-    quads.push({pts:[[px-1.1,cy-hh+2,pz-0.2],[px-1.1,cy+hh-6,pz-0.2],[px+1.1,cy+hh-6,pz-0.2],[px+1.1,cy-hh+2,pz-0.2]], color:white});
-    quads.push({pts:[[px-3.4,cy+hh-6,pz-0.2],[px,cy+hh-1,pz-0.2],[px+3.4,cy+hh-6,pz-0.2],[px,cy+hh-6,pz-0.2]], color:white});
+    quads.push({pts:[[px-hw-1,cy-hh-1,pz+2],[px-hw-1,cy+hh+1,pz+2],[px+hw+1,cy+hh+1,pz+2],[px+hw+1,cy-hh-1,pz+2]], color:black});
+    quads.push({pts:[[px-hw,cy-hh,pz],[px-hw,cy+hh,pz],[px+hw,cy+hh,pz],[px+hw,cy-hh,pz]], color:white});
+    quads.push({pts:[[px-1.3,shaftY0,pz-4],[px-1.3,shaftY1,pz-4],[px+1.3,shaftY1,pz-4],[px+1.3,shaftY0,pz-4]], color:black});
+    quads.push({pts:[[px-4.2,shaftY1,pz-4],[px,headY1,pz-4],[px+4.2,shaftY1,pz-4],[px,shaftY1,pz-4]], color:black});
   } else {
-    quads.push({pts:[[px,cy-hh,pz-hw],[px,cy+hh,pz-hw],[px,cy+hh,pz+hw],[px,cy-hh,pz+hw]], color:blue});
-    quads.push({pts:[[px-0.2,cy-hh+2,pz-1.1],[px-0.2,cy+hh-6,pz-1.1],[px-0.2,cy+hh-6,pz+1.1],[px-0.2,cy-hh+2,pz+1.1]], color:white});
-    quads.push({pts:[[px-0.2,cy+hh-6,pz-3.4],[px-0.2,cy+hh-1,pz],[px-0.2,cy+hh-6,pz+3.4],[px-0.2,cy+hh-6,pz]], color:white});
+    quads.push({pts:[[px,cy-hh-1,pz-hw-1],[px,cy+hh+1,pz-hw-1],[px,cy+hh+1,pz+hw+1],[px,cy-hh-1,pz+hw+1]], color:black});
+    quads.push({pts:[[px-2,cy-hh,pz-hw],[px-2,cy+hh,pz-hw],[px-2,cy+hh,pz+hw],[px-2,cy-hh,pz+hw]], color:white});
+    quads.push({pts:[[px-4,shaftY0,pz-1.3],[px-4,shaftY1,pz-1.3],[px-4,shaftY1,pz+1.3],[px-4,shaftY0,pz+1.3]], color:black});
+    quads.push({pts:[[px-4,shaftY1,pz-4.2],[px-4,headY1,pz],[px-4,shaftY1,pz+4.2],[px-4,shaftY1,pz]], color:black});
   }
   return quads;
 }
@@ -3591,12 +3692,13 @@ function drawScene(){
   }
 
   const shakeMag = shakeTimer > 0 ? 7 * (shakeTimer/SHAKE_DURATION) : 0;
+  const camPreset = CAMERA_PRESETS[cameraMode];
   const cam = {
-    x: player.x - Math.sin(player.heading)*CAM_BACK + (Math.random()*2-1)*shakeMag,
-    z: player.z - Math.cos(player.heading)*CAM_BACK + (Math.random()*2-1)*shakeMag,
-    y: CAM_HEIGHT + (Math.random()*2-1)*shakeMag*0.5,
+    x: player.x - Math.sin(player.heading)*camPreset.back + (Math.random()*2-1)*shakeMag,
+    z: player.z - Math.cos(player.heading)*camPreset.back + (Math.random()*2-1)*shakeMag,
+    y: camPreset.height + (Math.random()*2-1)*shakeMag*0.5,
     heading: player.heading,
-    pitch: -0.09
+    pitch: camPreset.pitch
   };
 
   // petrol station forecourts as flat ground markers (the canopy/pumps
@@ -3826,6 +3928,7 @@ function drawScene(){
     }
   }
   for(const car of allCars()){
+    if(car===player && cameraMode==='incar') continue;
     for(const f of buildVehicleQuads(car)){
       allFaces.push({pts:f.pts, color:f.color, stroke:carStroke, width:1, depth:faceDepth(f.pts, cam)});
     }
@@ -3869,6 +3972,32 @@ function drawScene(){
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(bb.slogan, screen.x, screen.y);
+    ctx.restore();
+  }
+
+  // "ONE WAY" text on each sign's lower third, same real-canvas-text +
+  // building-occlusion treatment as the billboard slogans above
+  for(const sg of oneWaySigns){
+    if(dist2(cam.x,cam.z,sg.x,sg.z) > (RENDER_DIST*0.6)*(RENDER_DIST*0.6)) continue;
+    const wx = sg.axis==='x' ? sg.x-0.3 : sg.x;
+    const wz = sg.axis==='z' ? sg.z-0.3 : sg.z;
+    const wy = 30;
+    let occluded = false;
+    for(const b of buildings){
+      if(segmentHitsBox(cam.x, cam.z, wx, wz, b.x1, b.x2, b.z1, b.z2)){ occluded = true; break; }
+    }
+    if(occluded) continue;
+    const camP = toCamSpace(wx, wy, wz, cam);
+    if(camP.z <= NEAR) continue;
+    const screen = toScreen(camP);
+    if(screen.x < -200 || screen.x > W+200 || screen.y < -100 || screen.y > H+100) continue;
+    const fontSize = clamp(900/camP.z, 4, 13);
+    ctx.save();
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.fillStyle = 'rgba(20,20,22,0.95)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('ONE WAY', screen.x, screen.y);
     ctx.restore();
   }
 
