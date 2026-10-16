@@ -922,10 +922,10 @@ function startGame(){
 // chug. Filtered road noise still rises with speed for texture.
 // ---------------------------------------------------------------
 const Engine = (function(){
-  let ac = null, osc, sub;
-  let chugLfo, chugDepth, chugGain;
+  let ac = null, osc, osc2, sub;
+  let chugLfo, chugShaper, chugDepth, chugGain;
   let noiseSrc, noiseFilter, noiseGain;
-  let shaper, filter, gainMaster;
+  let shaper, preShaperGain, filter, gainMaster;
   let started = false, muted = false, currentVol = 0;
 
   // normalized so the curve's peak stays near +-1 regardless of amount,
@@ -937,6 +937,21 @@ const Engine = (function(){
     for(let i=0;i<n;i++){
       const x = i*2/n - 1;
       curve[i] = Math.tanh(x*amount) / peak;
+    }
+    return curve;
+  }
+
+  // reshapes a plain sine LFO into a narrow pulse near its peak (raising
+  // the 0..1-remapped sine to a high power squeezes everything but the
+  // very top of the cycle toward zero) — the previous sawtooth chug LFO
+  // modulated gain with a smooth ramp-then-drop, which reads as a wobble
+  // rather than the sharp per-stroke "pop" a real engine's chug is
+  function chugCurve(){
+    const n = 512, curve = new Float32Array(n);
+    for(let i=0;i<n;i++){
+      const x = i*2/n - 1;
+      const u = (x+1)/2;
+      curve[i] = Math.pow(u, 6)*2 - 1;
     }
     return curve;
   }
@@ -957,16 +972,28 @@ const Engine = (function(){
     ac = new AC();
 
     osc = ac.createOscillator(); osc.type = 'sawtooth';
+    // a second sawtooth, slightly detuned, for the same reason any analog
+    // synth stacks two oscillators — a single bare sawtooth reads as thin
+    // and electronic; two a few cents apart beat against each other into
+    // a fuller, less sterile tone much closer to a real engine's buzz
+    osc2 = ac.createOscillator(); osc2.type = 'sawtooth';
     sub = ac.createOscillator(); sub.type = 'triangle';
 
     const mix = ac.createGain(); mix.gain.value = 1;
+    const osc2Gain = ac.createGain(); osc2Gain.gain.value = 0.65;
     const subGain = ac.createGain(); subGain.gain.value = 0.85;
     osc.connect(mix);
+    osc2.connect(osc2Gain); osc2Gain.connect(mix);
     sub.connect(subGain); subGain.connect(mix);
+
+    // driven harder (see the throttle-dependent gain in update()) for
+    // more grit and roar under load, not just a louder version of idle
+    preShaperGain = ac.createGain(); preShaperGain.gain.value = 0.85;
+    mix.connect(preShaperGain);
 
     shaper = ac.createWaveShaper();
     shaper.curve = softCurve(0.8);
-    mix.connect(shaper);
+    preShaperGain.connect(shaper);
 
     filter = ac.createBiquadFilter();
     filter.type = 'lowpass';
@@ -980,9 +1007,12 @@ const Engine = (function(){
     chugGain.gain.value = 0.75;
     filter.connect(chugGain);
 
-    chugLfo = ac.createOscillator(); chugLfo.type = 'sawtooth'; chugLfo.frequency.value = 9;
-    chugDepth = ac.createGain(); chugDepth.gain.value = 0.3;
-    chugLfo.connect(chugDepth);
+    chugLfo = ac.createOscillator(); chugLfo.type = 'sine'; chugLfo.frequency.value = 9;
+    chugShaper = ac.createWaveShaper();
+    chugShaper.curve = chugCurve();
+    chugDepth = ac.createGain(); chugDepth.gain.value = 0.35;
+    chugLfo.connect(chugShaper);
+    chugShaper.connect(chugDepth);
     chugDepth.connect(chugGain.gain);
 
     gainMaster = ac.createGain();
@@ -1004,7 +1034,7 @@ const Engine = (function(){
 
     gainMaster.connect(ac.destination);
 
-    osc.start(); sub.start(); chugLfo.start(); noiseSrc.start();
+    osc.start(); osc2.start(); sub.start(); chugLfo.start(); noiseSrc.start();
     if(ac.state === 'suspended') ac.resume();
   }
 
@@ -1030,8 +1060,15 @@ const Engine = (function(){
     const idleHz = 55, revHz = 190;
     const baseHz = idleHz + gearPos * (revHz - idleHz);
 
-    osc.frequency.setTargetAtTime(baseHz, now, 0.06);
-    sub.frequency.setTargetAtTime(baseHz * 0.5, now, 0.06);
+    // a slow, deterministic wobble (two summed sines, not per-frame
+    // randomness — raw Math.random() every tick would just turn into
+    // high-frequency noise once smoothed) so the pitch isn't perfectly
+    // locked to the gear math, which read as too clean/electronic
+    const jitter = Math.sin(now*17.3)*1.1 + Math.sin(now*4.1)*0.8;
+
+    osc.frequency.setTargetAtTime(baseHz + jitter, now, 0.06);
+    osc2.frequency.setTargetAtTime((baseHz + jitter) * 1.007, now, 0.06);
+    sub.frequency.setTargetAtTime((baseHz + jitter) * 0.5, now, 0.06);
 
     // chug rate climbs with revs — distinct "putt-putt" at idle, blurs
     // into a faster pulse at speed, which is how a real engine behaves
@@ -1042,6 +1079,10 @@ const Engine = (function(){
     // formant so idle stays a muffled rumble rather than a bright buzz —
     // throttle opens it up for the roar
     filter.frequency.setTargetAtTime(baseHz*2.4 + 140 + throttleBoost*300, now, 0.1);
+    // driving the pre-shaper gain harder under throttle pushes the signal
+    // further into the soft-clip curve, adding real grit/roar instead of
+    // just turning the same clean tone up louder
+    preShaperGain.gain.setTargetAtTime(0.8 + throttleBoost*0.7 + Math.min(spd/maxSpeed,1)*0.3, now, 0.08);
 
     noiseFilter.frequency.setTargetAtTime(500 + spd*3.2, now, 0.15);
     noiseGain.gain.setTargetAtTime(Math.min(spd/maxSpeed,1)*0.03, now, 0.15);
