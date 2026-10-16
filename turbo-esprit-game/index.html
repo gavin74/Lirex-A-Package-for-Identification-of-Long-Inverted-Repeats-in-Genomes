@@ -263,6 +263,7 @@ let levelCrossing = {x:0, z:0}; // a single rail crossing on one street
 let oneWayStreets = []; // {axis, line, dir} — the four perimeter streets, one-way round a loop
 let oneWaySigns = []; // {x,z,axis,dir} — big blue British one-way plates along those streets
 let billboards = []; // {x,z,facing,slogan} — massive, freestanding, mounted on the perimeter wall
+let medians = []; // {x1,x2,z1,z2} — collidable grass central reservations, a couple of streets made into dual carriageways
 let streetLinesX = [];
 let streetLinesZ = [];
 let worldTime = 0;     // elapsed play time, drives party-building light cycles
@@ -339,6 +340,33 @@ function generateCity(seed){
   streetLinesZ = [];
   for(let i=0;i<=BLOCKS_X;i++) streetLinesX.push((i-BLOCKS_X/2)*BLOCK);
   for(let j=0;j<=BLOCKS_Z;j++) streetLinesZ.push((j-BLOCKS_Z/2)*BLOCK);
+
+  // a couple of streets through the city are dual carriageways: a grass
+  // central reservation splits the road into two one-direction-feeling
+  // carriageways, same width/lane-offset as any other street either side
+  // of it. The reservation stops well clear of every cross-street (not a
+  // continuous strip) — otherwise it would physically wall off every
+  // intersection it crosses, trapping cross traffic that needs to pass
+  // straight through on a green light.
+  medians = [];
+  const medianHalf = 4;
+  const medianMargin = ROAD_HALF + 6;
+  const dualIdxX = [Math.round(BLOCKS_X/3), Math.round(BLOCKS_X*2/3)];
+  const dualIdxZ = [Math.round(BLOCKS_Z/3), Math.round(BLOCKS_Z*2/3)];
+  for(const ix of dualIdxX){
+    const line = streetLinesX[ix];
+    for(let i=0;i<BLOCKS_Z;i++){
+      const z1 = streetLinesZ[i]+medianMargin, z2 = streetLinesZ[i+1]-medianMargin;
+      if(z2>z1) medians.push({x1:line-medianHalf, x2:line+medianHalf, z1, z2});
+    }
+  }
+  for(const iz of dualIdxZ){
+    const line = streetLinesZ[iz];
+    for(let i=0;i<BLOCKS_X;i++){
+      const x1 = streetLinesX[i]+medianMargin, x2 = streetLinesX[i+1]-medianMargin;
+      if(x2>x1) medians.push({x1, x2, z1:line-medianHalf, z2:line+medianHalf});
+    }
+  }
 
   roadMarks = [];
   const dashLen = 20, dashGap = 22, dashHalfWid = 1.4;
@@ -1439,6 +1467,10 @@ function collideWorld(x, z, r){
     const cx = clamp(x, rw.x1, rw.x2), cz = clamp(z, rw.z1, rw.z2);
     if(dist2(x,z,cx,cz) < r*r) return true;
   }
+  for(const m of medians){
+    const cx = clamp(x, m.x1, m.x2), cz = clamp(z, m.z1, m.z2);
+    if(dist2(x,z,cx,cz) < r*r) return true;
+  }
   const vehicleR = r+8;
   for(const c of allTraffic()){
     if(dist2(x,z,c.x,c.z) < vehicleR*vehicleR) return true;
@@ -2105,6 +2137,23 @@ function buildingFaces(b, cam, near){
     faces.push({pts:[[b.x1,b.h,b.z1],[b.x2,b.h,b.z1],[b.x2,b.h,b.z2],[b.x1,b.h,b.z2]], color: shadeColor(tint, b.shade*1.15)});
   }
   return faces;
+}
+
+// a generic axis-aligned box's camera-facing side faces plus its top —
+// same convention as buildingFaces/wallFaces, pulled out so other low
+// solid obstacles (dual-carriageway medians) can share it
+function rectBoxFaces(x1, x2, z1, z2, y0, y1, cam, sideColor, topColor){
+  const faces = [];
+  if(cam.x < x1) faces.push({pts:[[x1,y0,z1],[x1,y1,z1],[x1,y1,z2],[x1,y0,z2]], color:sideColor});
+  else if(cam.x > x2) faces.push({pts:[[x2,y0,z2],[x2,y1,z2],[x2,y1,z1],[x2,y0,z1]], color:sideColor});
+  if(cam.z < z1) faces.push({pts:[[x2,y0,z1],[x2,y1,z1],[x1,y1,z1],[x1,y0,z1]], color:sideColor});
+  else if(cam.z > z2) faces.push({pts:[[x1,y0,z2],[x1,y1,z2],[x2,y1,z2],[x2,y0,z2]], color:sideColor});
+  if(cam.y < y1) faces.push({pts:[[x1,y1,z1],[x2,y1,z1],[x2,y1,z2],[x1,y1,z2]], color:topColor});
+  return faces;
+}
+const MEDIAN_SIDE = 'rgb(150,148,138)', MEDIAN_TOP = 'rgb(120,165,95)';
+function buildMedianQuads(m, cam){
+  return rectBoxFaces(m.x1, m.x2, m.z1, m.z2, 0, 2.2, cam, MEDIAN_SIDE, MEDIAN_TOP);
 }
 
 // A perimeter wall segment — same box shape as a building, one plain
@@ -3410,6 +3459,14 @@ function drawScene(){
     if(d > RENDER_DIST*RENDER_DIST) continue;
     for(const f of buildRoadworksQuads(rw)){
       allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
+    }
+  }
+  for(const m of medians){
+    const mx=(m.x1+m.x2)/2, mz=(m.z1+m.z2)/2;
+    const d = dist2(cam.x,cam.z,mx,mz);
+    if(d > RENDER_DIST*RENDER_DIST) continue;
+    for(const f of buildMedianQuads(m, cam)){
+      allFaces.push({pts:f.pts, color:f.color, stroke:'rgba(15,15,17,0.6)', width:1, depth:faceDepth(f.pts, cam)});
     }
   }
   for(const p of pedestrianPositions()){
