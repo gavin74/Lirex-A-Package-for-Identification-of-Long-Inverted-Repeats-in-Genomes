@@ -722,6 +722,30 @@ function spawnSuspect(){
 
 function dist2(x1,z1,x2,z2){ const dx=x1-x2, dz=z1-z2; return dx*dx+dz*dz; }
 
+// slab-method line-segment vs. axis-aligned box intersection, in the X-Z
+// ground plane — used to occlude billboard text behind buildings
+function segmentHitsBox(x0,z0,x1,z1, bx1,bx2,bz1,bz2){
+  let tmin = 0, tmax = 1;
+  const dx = x1-x0, dz = z1-z0;
+  if(Math.abs(dx) < 1e-9){
+    if(x0 < bx1 || x0 > bx2) return false;
+  } else {
+    let t1 = (bx1-x0)/dx, t2 = (bx2-x0)/dx;
+    if(t1>t2){ const tmp=t1; t1=t2; t2=tmp; }
+    tmin = Math.max(tmin,t1); tmax = Math.min(tmax,t2);
+    if(tmin>tmax) return false;
+  }
+  if(Math.abs(dz) < 1e-9){
+    if(z0 < bz1 || z0 > bz2) return false;
+  } else {
+    let t1 = (bz1-z0)/dz, t2 = (bz2-z0)/dz;
+    if(t1>t2){ const tmp=t1; t1=t2; t2=tmp; }
+    tmin = Math.max(tmin,t1); tmax = Math.min(tmax,t2);
+    if(tmin>tmax) return false;
+  }
+  return tmin <= tmax;
+}
+
 // ---------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------
@@ -1212,7 +1236,17 @@ document.getElementById('hudSound').addEventListener('click', toggleMute);
 // so there's no way to mistime it into a crash.
 function changeLane(side){
   if(gameState!=='playing' || !player) return;
-  player.lane = side==='left' ? -1 : 1;
+  // "right" always meant "toward world +x" (or +z on an x-axis street)
+  // regardless of which way the car was actually pointed — correct only
+  // when dir happened to be +1. Driving the other way on either axis
+  // (dir -1, or axis 'x' at all) made A and D swap, since the car's own
+  // right side doesn't always correspond to the same world direction.
+  // This is the same rotation correctLane() already uses for picking the
+  // legal lane after a turn, just without the DRIVE_SIDE flip — pressing
+  // your own right should always mean your own right, independent of
+  // which side of the road counts as "correct".
+  const rightSign = player.dir * (player.axis==='z' ? 1 : -1);
+  player.lane = side==='left' ? -rightSign : rightSign;
   setSignal(player, side, 0.8);
 }
 
@@ -3343,13 +3377,19 @@ function drawScene(){
   }
 
   // billboard slogans, drawn as real canvas text on top of everything —
-  // simplest way to keep them legible without a proper occlusion pass,
-  // and billboards are always out at the city's edge with a clear
-  // approach anyway
+  // the panel itself already gets hidden behind nearer buildings
+  // correctly via the normal depth sort, but this text is a separate
+  // un-sorted overlay, so without its own occlusion test it would show
+  // straight through any building standing between the camera and it
   for(const bb of billboards){
     if(dist2(cam.x,cam.z,bb.x,bb.z) > (RENDER_DIST*0.6)*(RENDER_DIST*0.6)) continue;
     const s = Math.sin(bb.facing), c = Math.cos(bb.facing);
     const wx = bb.x + 0.6*s, wz = bb.z + 0.6*c, wy = 37;
+    let occluded = false;
+    for(const b of buildings){
+      if(segmentHitsBox(cam.x, cam.z, wx, wz, b.x1, b.x2, b.z1, b.z2)){ occluded = true; break; }
+    }
+    if(occluded) continue;
     const camP = toCamSpace(wx, wy, wz, cam);
     if(camP.z <= NEAR) continue;
     const screen = toScreen(camP);
