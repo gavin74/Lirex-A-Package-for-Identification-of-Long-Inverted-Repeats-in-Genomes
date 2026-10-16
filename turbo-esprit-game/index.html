@@ -62,10 +62,10 @@
   .label{color:var(--dim);font-size:11px}
   .bar{width:100px;height:8px;background:#111;border:1px solid #444;margin-top:2px}
   .bar > i{display:block;height:100%;background:var(--good)}
-  #speedbar > i{background:var(--accent);transition:width 0.08s linear}
-  #revbar > i{background:#d9503a;transition:width 0.08s linear}
   #fuelbar.low > i{background:var(--bad)}
   #minimap{border:1px solid var(--panel-edge);background:rgba(8,9,10,.76)}
+  .dialRow{display:flex;gap:6px}
+  .dialRow canvas{background:rgba(8,9,10,.5);border-radius:50%}
   .clickable{cursor:pointer;pointer-events:auto;color:var(--good)}
 
   #banner{
@@ -113,10 +113,10 @@
     <canvas id="c" width="800" height="500"></canvas>
     <div id="hud">
       <div class="box">
-        <div class="row"><span class="label">SPEED</span><span id="hudSpeed">000</span></div>
-        <div id="speedbar" class="bar"><i style="width:0%"></i></div>
-        <div class="row"><span class="label">REV</span></div>
-        <div id="revbar" class="bar"><i style="width:8%"></i></div>
+        <div class="dialRow">
+          <canvas id="speedDial" width="76" height="76"></canvas>
+          <canvas id="revDial" width="76" height="76"></canvas>
+        </div>
         <div id="fuelWrap">
           <div class="row"><span class="label">FUEL</span></div>
           <div id="fuelbar" class="bar"><i style="width:100%"></i></div>
@@ -171,8 +171,8 @@
 // ---------------------------------------------------------------
 const BLOCKS_X = 13, BLOCKS_Z = 13;
 const AREA_SCALE = (BLOCKS_X*BLOCKS_Z) / 81; // decorative-density scalar, 1.0 at the original 9x9 size
-const BLOCK = 260;                 // grid spacing — wider blocks/roads, bigger map for the same block count
-const BUILD_HALF = 68;             // building footprint half-size (leaves street gaps)
+const BLOCK = 600;                 // grid spacing — much bigger city blocks for the same block count
+const BUILD_HALF = 250;            // building footprint half-size (leaves street gaps) — ~4x the original lot size
 const RENDER_DIST = 1000;
 const NEAR = 4;
 const FOV_FOCAL = 260;
@@ -1698,20 +1698,36 @@ function updateStreetCar(car, dt){
   // the player already stops for traffic (collideWorld, in updatePlayer),
   // but that's a one-way rule — traffic never checked for the player at
   // all, so it drove straight through a stationary or oncoming car with
-  // nothing to stop it. Compute where this car is ABOUT to be and brake
-  // dead (same hard-stop idiom as a red light) if that would overlap the
-  // player, rather than committing the move and discovering it after.
+  // nothing to stop it. A real driver slows smoothly as the gap closes
+  // rather than teleporting to a dead stop the instant it would overlap —
+  // only a genuine "couldn't stop in time" case (the player well inside
+  // the car's stopping distance) still ends in an actual crash.
+  car.crashCooldown = Math.max(0, (car.crashCooldown||0) - dt);
   const avoid = obstacleAvoidOffset(car);
   const crossPos = car.laneHome + avoid;
-  const prospectiveForward = (car.axis==='z' ? car.z : car.x) + car.dir*car.speed*honkMul*dt;
-  const nx = car.axis==='z' ? crossPos : prospectiveForward;
-  const nz = car.axis==='z' ? prospectiveForward : crossPos;
-  const PLAYER_BLOCK_R = 17;
-  if(player && dist2(nx,nz,player.x,player.z) < PLAYER_BLOCK_R*PLAYER_BLOCK_R){
-    car.braking = true;
-    if(car.axis==='z') car.x = crossPos; else car.z = crossPos;
-    return;
+  const forward = car.axis==='z' ? car.z : car.x;
+  const BRAKE_DIST = 90, MIN_GAP = 20;
+  let speedTarget = car.maxSpeed;
+  if(player){
+    const playerForward = car.axis==='z' ? player.z : player.x;
+    const playerCross = car.axis==='z' ? player.x : player.z;
+    const aheadDist = (playerForward - forward) * car.dir;
+    const lateralGap = Math.abs(crossPos - playerCross);
+    if(aheadDist > 0 && aheadDist < BRAKE_DIST && lateralGap < 13){
+      const frac = clamp((aheadDist-MIN_GAP)/(BRAKE_DIST-MIN_GAP), 0, 1);
+      speedTarget = car.maxSpeed * frac;
+      if(aheadDist < MIN_GAP*0.6 && car.crashCooldown<=0){
+        SFX.crash();
+        car.crashCooldown = 1.5;
+        speedTarget = 0;
+      }
+    }
   }
+  if(car.speed < speedTarget) car.speed = Math.min(speedTarget, car.speed + 90*dt);
+  else car.speed = Math.max(speedTarget, car.speed - 220*dt);
+  car.braking = car.braking || car.speed < car.maxSpeed - 1;
+
+  const prospectiveForward = forward + car.dir*car.speed*honkMul*dt;
   if(car.axis==='z'){ car.z = prospectiveForward; car.x = crossPos; }
   else { car.x = prospectiveForward; car.z = crossPos; }
 
@@ -3245,18 +3261,27 @@ function buildTrafficLightQuads(tl, cam){
   ];
 }
 
+// a crossing has two different dimensions that used to be swapped: the
+// stripes need to reach curb-to-curb across the road being crossed (was a
+// fixed ~45 units regardless of road width, so it fell well short once
+// ROAD_HALF grew with the bigger map and never reached the pavement), while
+// the crosswalk's own width should stay a modest fixed size (was
+// ROAD_HALF-6, i.e. nearly the whole road, reading as oversized and
+// overlapping the perpendicular crossing at the same junction)
 function buildZebraQuads(sx, sz, axis){
   const quads = [];
-  const half = ROAD_HALF - 6;
-  const stripeW = 5, gap = 5, n = 5;
+  const crossWidth = 18;
+  const stripeW = 5, gap = 5;
+  const spanTarget = ROAD_HALF*2 + 6;
+  const n = Math.max(3, Math.round(spanTarget/(stripeW+gap)));
   const totalSpan = n*stripeW + (n-1)*gap;
   const start = -totalSpan/2;
   const color = 'rgba(230,228,220,0.85)';
   for(let i=0;i<n;i++){
     const o0 = start + i*(stripeW+gap), o1 = o0+stripeW;
     const pts = axis==='z'
-      ? [[sx-half,0.15,sz+o0],[sx+half,0.15,sz+o0],[sx+half,0.15,sz+o1],[sx-half,0.15,sz+o1]]
-      : [[sx+o0,0.15,sz-half],[sx+o0,0.15,sz+half],[sx+o1,0.15,sz+half],[sx+o1,0.15,sz-half]];
+      ? [[sx-crossWidth,0.15,sz+o0],[sx+crossWidth,0.15,sz+o0],[sx+crossWidth,0.15,sz+o1],[sx-crossWidth,0.15,sz+o1]]
+      : [[sx+o0,0.15,sz-crossWidth],[sx+o0,0.15,sz+crossWidth],[sx+o1,0.15,sz+crossWidth],[sx+o1,0.15,sz-crossWidth]];
     quads.push({pts, color});
   }
   return quads;
@@ -4078,9 +4103,60 @@ function drawMinimap(){
   dot(player.x, player.z, '#ffffff', 3);
 }
 
+// a classic automotive dial: 270-degree sweep from lower-left (empty)
+// clockwise through the top to lower-right (full), with a handful of
+// major ticks and a needle — canvas angle 135deg points down-left and
+// 45deg (=405deg) points down-right in this y-down coordinate system, so
+// sweeping from 135 to 405 passes through the top (270deg) at the midpoint
+function drawDialGauge(canvas, frac, color, label, digital){
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const cx = w/2, cy = h/2, r = Math.min(w,h)/2 - 4;
+  ctx.clearRect(0,0,w,h);
+  ctx.beginPath();
+  ctx.arc(cx,cy,r,0,Math.PI*2);
+  ctx.fillStyle = 'rgba(18,19,22,0.92)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(180,180,190,0.5)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  const startA = 135*Math.PI/180, sweep = 270*Math.PI/180;
+  ctx.strokeStyle = 'rgba(210,210,215,0.7)';
+  ctx.lineWidth = 1.5;
+  for(let i=0;i<=6;i++){
+    const a = startA + (i/6)*sweep;
+    ctx.beginPath();
+    ctx.moveTo(cx+Math.cos(a)*(r-7), cy+Math.sin(a)*(r-7));
+    ctx.lineTo(cx+Math.cos(a)*(r-2), cy+Math.sin(a)*(r-2));
+    ctx.stroke();
+  }
+
+  const na = startA + clamp(frac,0,1)*sweep;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx+Math.cos(na)*(r-10), cy+Math.sin(na)*(r-10));
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx,cy,3,0,Math.PI*2);
+  ctx.fillStyle = color;
+  ctx.fill();
+
+  ctx.textAlign = 'center';
+  if(digital !== undefined){
+    ctx.font = 'bold 14px monospace';
+    ctx.fillStyle = '#eee';
+    ctx.fillText(digital, cx, cy+r*0.3);
+  }
+  ctx.font = 'bold 8px monospace';
+  ctx.fillStyle = 'rgba(210,210,215,0.75)';
+  ctx.fillText(label, cx, cy+r*0.58);
+}
+
 function updateHUD(){
-  document.getElementById('hudSpeed').textContent = String(Math.round(Math.abs(player.speed))).padStart(3,'0');
-  document.getElementById('speedbar').querySelector('i').style.width = clamp(Math.abs(player.speed)/player.maxSpeed*100,0,100)+'%';
+  drawDialGauge(document.getElementById('speedDial'), Math.abs(player.speed)/player.maxSpeed, '#e0a030', 'SPD', Math.round(Math.abs(player.speed)));
   // same per-gear sawtooth Engine's audio synthesis already drives its
   // pitch from, so the needle and the engine note climb and reset together
   {
@@ -4089,7 +4165,7 @@ function updateHUD(){
     const span = player.maxSpeed / REV_GEARS;
     const gearPos = spd <= 1 ? 0 : (spd % span) / span;
     const revFrac = 0.08 + gearPos*0.92; // idle reading, never a dead zero at a stop
-    document.getElementById('revbar').querySelector('i').style.width = clamp(revFrac*100,0,100)+'%';
+    drawDialGauge(document.getElementById('revDial'), revFrac, '#d9503a', 'REV');
   }
   document.getElementById('hudTime').textContent = String(Math.max(0,Math.ceil(timeLeft)));
   document.getElementById('hudScore').textContent = score;
