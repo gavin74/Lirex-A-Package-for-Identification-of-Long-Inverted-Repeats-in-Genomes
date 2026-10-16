@@ -209,14 +209,17 @@ let RENDER_DIST = RENDER_DIST_DAY;
 const NEAR = 4;
 const FOV_FOCAL = 260;
 const HORIZON_Y = 205;
-const CAM_HEIGHT = 27;             // lower + closer than before — Turbo Esprit's chase cam
-const CAM_BACK = 23;               // showed much more of the car's own body
+const CAM_HEIGHT = 24;             // lower + closer than before — Turbo Esprit's chase cam
+const CAM_BACK = 34;               // far enough back the whole car actually fits in frame —
+                                    // 23 still cropped the nose on anything longer than the sports car
 // selectable chase-cam presets — cycled with 'v'. 'incar' hides the
 // player's own car model (see the allCars() render loop) since the camera
-// sits inside it, same as a real cockpit view would.
-const CAMERA_MODES = ['close', 'far', 'incar'];
+// sits inside it, same as a real cockpit view would. 'roadside' is a
+// different animal entirely — see updateRoadsideCam/the cam construction
+// below, which look at the player rather than sitting fixed behind it.
+const CAMERA_MODES = ['close', 'far', 'incar', 'roadside'];
 const CAMERA_PRESETS = {
-  close: { back: CAM_BACK, height: CAM_HEIGHT, pitch: -0.09 },
+  close: { back: CAM_BACK, height: CAM_HEIGHT, pitch: -0.08 },
   far:   { back: 46, height: 42, pitch: -0.15 },
   incar: { back: 0, height: 16, pitch: -0.01 }
 };
@@ -225,6 +228,37 @@ function cycleCameraMode(){
   const i = CAMERA_MODES.indexOf(cameraMode);
   cameraMode = CAMERA_MODES[(i+1)%CAMERA_MODES.length];
   showBanner('VIEW: ' + cameraMode.toUpperCase(), 0.9);
+}
+
+// a fixed trackside camera that watches you go by, like a TV camera
+// planted at the roadside, rather than a rig bolted to the car — it sits
+// still and pans/tilts to track the player (see the look-at cam build in
+// drawScene), then cuts to a fresh spot once the player's passed it, so
+// the shot keeps updating as you drive instead of holding one angle
+// forever.
+let roadsideCam = null; // {x,y,z,heading,placedAt} — heading is the player's travel direction when placed, used to tell when they've driven past it
+const ROADSIDE_HOLD_MAX = 9; // seconds before cutting to a new angle regardless
+const ROADSIDE_PASS_DIST = 45; // how far past the camera the player has to get before it cuts
+function updateRoadsideCam(dt){
+  if(cameraMode !== 'roadside' || !player){ roadsideCam = null; return; }
+  let need = !roadsideCam || (worldTime - roadsideCam.placedAt) > ROADSIDE_HOLD_MAX;
+  if(!need){
+    const passed = (player.x-roadsideCam.x)*Math.sin(roadsideCam.heading) + (player.z-roadsideCam.z)*Math.cos(roadsideCam.heading);
+    if(passed > ROADSIDE_PASS_DIST) need = true;
+  }
+  if(!need) return;
+  const h = player.heading;
+  const fx = Math.sin(h), fz = Math.cos(h);
+  const rx = Math.cos(h), rz = -Math.sin(h);
+  const ahead = 55 + Math.random()*55;
+  const side = (Math.random()<0.5?-1:1) * (22 + Math.random()*16);
+  roadsideCam = {
+    x: player.x + fx*ahead + rx*side,
+    z: player.z + fz*ahead + rz*side,
+    y: 8 + Math.random()*9,
+    heading: h,
+    placedAt: worldTime
+  };
 }
 const CATCH_RADIUS = 24;
 const CATCH_BONUS_FUEL = 20;       // fuel does the job a time bonus used to — the run is
@@ -2501,6 +2535,7 @@ function update(dt){
   if(shakeTimer > 0) shakeTimer -= dt;
   updateBlink(dt);
   updateWindowFlicker(dt);
+  updateRoadsideCam(dt);
   updatePlayer(dt);
   updateBullets(dt);
   updateOilSlicks(dt);
@@ -4363,14 +4398,26 @@ function drawScene(){
   }
 
   const shakeMag = shakeTimer > 0 ? 7 * (shakeTimer/SHAKE_DURATION) : 0;
-  const camPreset = CAMERA_PRESETS[cameraMode];
-  const cam = {
-    x: player.x - Math.sin(player.heading)*camPreset.back + (Math.random()*2-1)*shakeMag,
-    z: player.z - Math.cos(player.heading)*camPreset.back + (Math.random()*2-1)*shakeMag,
-    y: camPreset.height + (Math.random()*2-1)*shakeMag*0.5,
-    heading: player.heading,
-    pitch: camPreset.pitch
-  };
+  let cam;
+  if(cameraMode === 'roadside' && roadsideCam){
+    const dx = player.x - roadsideCam.x, dz = player.z - roadsideCam.z;
+    const targetY = 9; // aim roughly at cabin height, not the ground under the car
+    const horiz = Math.sqrt(dx*dx+dz*dz) || 1;
+    cam = {
+      x: roadsideCam.x, z: roadsideCam.z, y: roadsideCam.y,
+      heading: Math.atan2(dx, dz),
+      pitch: Math.atan2(targetY - roadsideCam.y, horiz)
+    };
+  } else {
+    const camPreset = CAMERA_PRESETS[cameraMode] || CAMERA_PRESETS.close;
+    cam = {
+      x: player.x - Math.sin(player.heading)*camPreset.back + (Math.random()*2-1)*shakeMag,
+      z: player.z - Math.cos(player.heading)*camPreset.back + (Math.random()*2-1)*shakeMag,
+      y: camPreset.height + (Math.random()*2-1)*shakeMag*0.5,
+      heading: player.heading,
+      pitch: camPreset.pitch
+    };
+  }
 
   // petrol station forecourts as flat ground markers (the canopy/pumps
   // above them are depth-sorted below, alongside buildings and cars)
