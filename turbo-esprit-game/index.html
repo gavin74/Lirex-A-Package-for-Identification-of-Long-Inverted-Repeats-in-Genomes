@@ -1844,10 +1844,18 @@ function updatePlayer(dt){
   player.gunCooldown -= dt;
   player.oilCooldown -= dt;
 
+  // steer around roundabouts/roadworks the same way AI traffic already
+  // does (obstacleAvoidOffset) — without this the player had no avoidance
+  // at all and could drive straight into a roundabout, wedging against its
+  // collision circle with no way to move forward again (only reversing
+  // escaped it, which read as the car just freezing at a junction)
+  player.laneHome = player.streetCoord + player.lane * LANE_OFFSET;
+  const avoid = obstacleAvoidOffset(player);
+
   // ease toward the target lane (exponential approach, fast at first and
   // slowing into place) rather than a constant-speed slide that just snaps
   // the instant it arrives — reads as a much smoother lane change
-  const targetOffset = player.lane * LANE_OFFSET;
+  const targetOffset = player.lane * LANE_OFFSET + avoid;
   const prevLaneOffset = player.laneOffset;
   const laneEase = 1 - Math.exp(-LANE_SPEED/LANE_OFFSET*dt);
   player.laneOffset += (targetOffset - player.laneOffset) * laneEase;
