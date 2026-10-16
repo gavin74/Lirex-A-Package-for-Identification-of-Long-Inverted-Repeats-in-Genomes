@@ -220,7 +220,21 @@ const ROUNDABOUTS_ENABLED = true;  // experimental, flag-gated per request — a
                                     // collidable island the player must steer around
                                     // using the existing lane system; AI traffic
                                     // doesn't route around it yet, only the player
-const ROAD_HALF = (BLOCK - BUILD_HALF*2) / 2; // half-width of the drivable gap between buildings
+// Roads are no longer one uniform width. Minor streets keep the original
+// footprint; priority/arterial streets (see ARTERIAL_STEP below) are
+// physically widened — buildings along an arterial set back further on
+// that side specifically — to actually fit 3 lanes each direction plus a
+// center turn lane, rather than trying to squeeze that into the old
+// single-lane width. ROAD_HALF_MINOR is the same value ROAD_HALF always
+// was; code that doesn't yet know which street it's dealing with should
+// use the per-street roadHalfX/roadHalfZ lookups built in generateCity,
+// not either constant directly.
+const ROAD_HALF_MINOR = (BLOCK - BUILD_HALF*2) / 2;
+const ARTERIAL_LANE_W = 16;          // width of each through lane
+const ARTERIAL_LANES_PER_SIDE = 3;
+const ARTERIAL_TURN_LANE_HALF = 8;   // half-width of the center turn lane
+const ARTERIAL_DRIVABLE_HALF = ARTERIAL_TURN_LANE_HALF + ARTERIAL_LANES_PER_SIDE*ARTERIAL_LANE_W; // 56
+const ROAD_HALF_ARTERIAL = ARTERIAL_DRIVABLE_HALF + 20; // + sidewalk & margin
 const TL_CYCLE = 7, TL_AMBER = 1.2, TL_GAP = 1.5; // traffic-light phase timing (seconds) — TL_GAP also doubles as the red-amber duration
 const TL_STOP_WINDOW = 26;         // how far ahead of a red/amber light traffic stops
 const SIGN_TYPES = ['stop','give_way','speed','direction'];
@@ -295,6 +309,8 @@ let medians = []; // {x1,x2,z1,z2} — collidable grass central reservations, a 
 let clocks = []; // {x,z,facing} — street clock towers, hands driven by the actual in-game time of day
 let streetLinesX = [];
 let streetLinesZ = [];
+let isArterialX = [], isArterialZ = [];  // one bool per streetLinesX/Z entry
+let roadHalfX = [], roadHalfZ = [];      // same indexing — ROAD_HALF_ARTERIAL or _MINOR per line
 let worldTime = 0;     // elapsed play time, drives party-building light cycles
 
 function cellCenter(i, n){ return (i - n/2 + 0.5) * BLOCK; }
@@ -333,13 +349,35 @@ function makeBuildingAt(cx, cz, halfX, halfZ, rnd){
 }
 
 function generateCity(seed){
+  // street lines and which of them are priority/arterial roads have to
+  // exist before buildings do now — an arterial street needs buildings
+  // along it to set back further specifically on that side, which a
+  // uniform BUILD_HALF square can't express. Every 3rd line on each axis
+  // is arterial (see the stop-sign/traffic-light grid below, which reads
+  // the same flags for the same reason).
+  streetLinesX = [];
+  streetLinesZ = [];
+  for(let i=0;i<=BLOCKS_X;i++) streetLinesX.push((i-BLOCKS_X/2)*BLOCK);
+  for(let j=0;j<=BLOCKS_Z;j++) streetLinesZ.push((j-BLOCKS_Z/2)*BLOCK);
+  const ARTERIAL_STEP = 3;
+  isArterialX = streetLinesX.map((_, i) => i % ARTERIAL_STEP === 0);
+  isArterialZ = streetLinesZ.map((_, i) => i % ARTERIAL_STEP === 0);
+  roadHalfX = isArterialX.map(a => a ? ROAD_HALF_ARTERIAL : ROAD_HALF_MINOR);
+  roadHalfZ = isArterialZ.map(a => a ? ROAD_HALF_ARTERIAL : ROAD_HALF_MINOR);
+
   buildings = [];
   gasPads = [];
   let rnd = mulberry32(seed);
   for(let i=0;i<BLOCKS_X;i++){
     for(let j=0;j<BLOCKS_Z;j++){
-      const cx = cellCenter(i, BLOCKS_X);
-      const cz = cellCenter(j, BLOCKS_Z);
+      // the cell's own rectangle, asymmetric: each of its 4 sides backs
+      // off from its bounding street by THAT street's own road-half, so
+      // a cell next to an arterial is narrower on that side only, not a
+      // uniform BUILD_HALF square anymore
+      const x1 = streetLinesX[i] + roadHalfX[i], x2 = streetLinesX[i+1] - roadHalfX[i+1];
+      const z1 = streetLinesZ[j] + roadHalfZ[j], z2 = streetLinesZ[j+1] - roadHalfZ[j+1];
+      const cx = (x1+x2)/2, cz = (z1+z2)/2;
+      const cellHalfX = (x2-x1)/2, cellHalfZ = (z2-z1)/2;
       const isGas = (i % 4 === 2 && j % 4 === 2);
       if(isGas){
         const pad = {x:cx, z:cz, r:46};
@@ -351,24 +389,22 @@ function generateCity(seed){
       // between them, a cut-through the player can actually squeeze down
       if(rnd() < 0.14){
         const alleyW = 26;
-        const halfEach = (BUILD_HALF*2-alleyW)/4;
-        const off = alleyW/2+halfEach;
         if(rnd()<0.5){
-          buildings.push(makeBuildingAt(cx-off, cz, halfEach, BUILD_HALF, rnd));
-          buildings.push(makeBuildingAt(cx+off, cz, halfEach, BUILD_HALF, rnd));
+          const halfEach = (cellHalfX*2-alleyW)/4;
+          const off = alleyW/2+halfEach;
+          buildings.push(makeBuildingAt(cx-off, cz, halfEach, cellHalfZ, rnd));
+          buildings.push(makeBuildingAt(cx+off, cz, halfEach, cellHalfZ, rnd));
         } else {
-          buildings.push(makeBuildingAt(cx, cz-off, BUILD_HALF, halfEach, rnd));
-          buildings.push(makeBuildingAt(cx, cz+off, BUILD_HALF, halfEach, rnd));
+          const halfEach = (cellHalfZ*2-alleyW)/4;
+          const off = alleyW/2+halfEach;
+          buildings.push(makeBuildingAt(cx, cz-off, cellHalfX, halfEach, rnd));
+          buildings.push(makeBuildingAt(cx, cz+off, cellHalfX, halfEach, rnd));
         }
       } else {
-        buildings.push(makeBuildingAt(cx, cz, BUILD_HALF, BUILD_HALF, rnd));
+        buildings.push(makeBuildingAt(cx, cz, cellHalfX, cellHalfZ, rnd));
       }
     }
   }
-  streetLinesX = [];
-  streetLinesZ = [];
-  for(let i=0;i<=BLOCKS_X;i++) streetLinesX.push((i-BLOCKS_X/2)*BLOCK);
-  for(let j=0;j<=BLOCKS_Z;j++) streetLinesZ.push((j-BLOCKS_Z/2)*BLOCK);
 
   // a couple of streets through the city are dual carriageways: a grass
   // central reservation splits the road into two one-direction-feeling
@@ -376,12 +412,18 @@ function generateCity(seed){
   // of it. The reservation stops well clear of every cross-street (not a
   // continuous strip) — otherwise it would physically wall off every
   // intersection it crosses, trapping cross traffic that needs to pass
-  // straight through on a green light.
+  // straight through on a green light. Kept to minor streets only now —
+  // arterials get a driveable center turn lane instead (see roadMarks
+  // below), and a solid median would fight that for the same ground.
   medians = [];
   const medianHalf = 4;
-  const medianMargin = ROAD_HALF + 6;
-  const dualIdxX = [Math.round(BLOCKS_X/3), Math.round(BLOCKS_X*2/3)];
-  const dualIdxZ = [Math.round(BLOCKS_Z/3), Math.round(BLOCKS_Z*2/3)];
+  const medianMargin = ROAD_HALF_MINOR + 6;
+  const minorIdxX = [];
+  for(let i=1;i<BLOCKS_X;i++) if(!isArterialX[i]) minorIdxX.push(i);
+  const minorIdxZ = [];
+  for(let i=1;i<BLOCKS_Z;i++) if(!isArterialZ[i]) minorIdxZ.push(i);
+  const dualIdxX = [minorIdxX[Math.floor(minorIdxX.length/3)], minorIdxX[Math.floor(minorIdxX.length*2/3)]].filter(v=>v!==undefined);
+  const dualIdxZ = [minorIdxZ[Math.floor(minorIdxZ.length/3)], minorIdxZ[Math.floor(minorIdxZ.length*2/3)]].filter(v=>v!==undefined);
   for(const ix of dualIdxX){
     const line = streetLinesX[ix];
     for(let i=0;i<BLOCKS_Z;i++){
@@ -399,14 +441,36 @@ function generateCity(seed){
 
   roadMarks = [];
   const dashLen = 20, dashGap = 22, dashHalfWid = 1.4;
-  for(const x of streetLinesX){
-    for(let z=-worldHalfZ+dashGap; z<worldHalfZ; z+=dashLen+dashGap){
-      roadMarks.push({x1:x-dashHalfWid, x2:x+dashHalfWid, z1:z, z2:z+dashLen});
+  const TURN_LANE_COLOR = 'rgba(214,190,100,0.85)';
+  // arterials get the full lane layout painted on: a dashed boundary each
+  // side of the center turn lane (picked out in a pale yellow so it reads
+  // as different from an ordinary lane line) plus a dashed divider between
+  // each of the 3 through lanes on each side — 6 lines total instead of
+  // the single centerline a minor street gets
+  const arterialOffsets = [];
+  for(let lane=1; lane<=ARTERIAL_LANES_PER_SIDE; lane++){
+    const edge = ARTERIAL_TURN_LANE_HALF + (lane-1)*ARTERIAL_LANE_W;
+    if(edge === 0) continue;
+    const color = lane===1 ? TURN_LANE_COLOR : undefined;
+    arterialOffsets.push({off:edge, color});
+    arterialOffsets.push({off:-edge, color});
+  }
+  for(let i=0;i<streetLinesX.length;i++){
+    const x = streetLinesX[i];
+    const offsets = isArterialX[i] ? arterialOffsets : [{off:0}];
+    for(const {off, color} of offsets){
+      for(let z=-worldHalfZ+dashGap; z<worldHalfZ; z+=dashLen+dashGap){
+        roadMarks.push({x1:x+off-dashHalfWid, x2:x+off+dashHalfWid, z1:z, z2:z+dashLen, color});
+      }
     }
   }
-  for(const z of streetLinesZ){
-    for(let x=-worldHalfX+dashGap; x<worldHalfX; x+=dashLen+dashGap){
-      roadMarks.push({x1:x, x2:x+dashLen, z1:z-dashHalfWid, z2:z+dashHalfWid});
+  for(let i=0;i<streetLinesZ.length;i++){
+    const z = streetLinesZ[i];
+    const offsets = isArterialZ[i] ? arterialOffsets : [{off:0}];
+    for(const {off, color} of offsets){
+      for(let x=-worldHalfX+dashGap; x<worldHalfX; x+=dashLen+dashGap){
+        roadMarks.push({x1:x, x2:x+dashLen, z1:z+off-dashHalfWid, z2:z+off+dashHalfWid, color});
+      }
     }
   }
 
@@ -418,21 +482,23 @@ function generateCity(seed){
   // medians sitting there and fighting with them for the same ground,
   // which read as flickering debris in the middle of the road
   sidewalks = [];
-  const swWidth = 11, swMargin = ROAD_HALF + 8;
-  for(const x of streetLinesX){
+  const swWidth = 11;
+  for(let ix=0; ix<streetLinesX.length; ix++){
+    const x = streetLinesX[ix];
     for(let side of [-1,1]){
-      const sx = x + side*(ROAD_HALF-swWidth/2-1);
+      const sx = x + side*(roadHalfX[ix]-swWidth/2-1);
       for(let i=0;i<BLOCKS_Z;i++){
-        const z1 = streetLinesZ[i]+swMargin, z2 = streetLinesZ[i+1]-swMargin;
+        const z1 = streetLinesZ[i]+roadHalfZ[i]+8, z2 = streetLinesZ[i+1]-roadHalfZ[i+1]-8;
         if(z2>z1) sidewalks.push({x1:sx-swWidth/2, x2:sx+swWidth/2, z1, z2});
       }
     }
   }
-  for(const z of streetLinesZ){
+  for(let iz=0; iz<streetLinesZ.length; iz++){
+    const z = streetLinesZ[iz];
     for(let side of [-1,1]){
-      const sz = z + side*(ROAD_HALF-swWidth/2-1);
+      const sz = z + side*(roadHalfZ[iz]-swWidth/2-1);
       for(let i=0;i<BLOCKS_X;i++){
-        const x1 = streetLinesX[i]+swMargin, x2 = streetLinesX[i+1]-swMargin;
+        const x1 = streetLinesX[i]+roadHalfX[i]+8, x2 = streetLinesX[i+1]-roadHalfX[i+1]-8;
         if(x2>x1) sidewalks.push({x1, x2, z1:sz-swWidth/2, z2:sz+swWidth/2});
       }
     }
@@ -481,14 +547,12 @@ function generateCity(seed){
   // Real cities have a road hierarchy: a sparser grid of main roads that
   // keep moving, with minor streets feeding into them under a stop/give-way
   // rather than every intersection being an equal, uncontrolled crossing.
-  // Every 3rd line on each axis is a "priority" road; where two priority
+  // (isArterialX/Z and roadHalfX/Z were already computed at the top of
+  // this function, before buildings — see there.) Where two priority
   // roads cross gets a traffic light (spread evenly across the whole grid
   // now, not clustered in one corner), where a priority road crosses a
   // minor one the minor side gets a stop sign, and where two minor streets
   // cross it's an all-way stop. That leaves no junction uncontrolled.
-  const ARTERIAL_STEP = 3;
-  const isArterialX = streetLinesX.map((_, i) => i % ARTERIAL_STEP === 0);
-  const isArterialZ = streetLinesZ.map((_, i) => i % ARTERIAL_STEP === 0);
   trafficLights = [];
   stopSigns = [];
   for(let ix=0; ix<streetLinesX.length; ix++){
@@ -496,9 +560,9 @@ function generateCity(seed){
       const ax = isArterialX[ix], az = isArterialZ[iz];
       const x = streetLinesX[ix], z = streetLinesZ[iz];
       if(ax && az) trafficLights.push({x, z});
-      else if(ax && !az) stopSigns.push({x, z, stopAxes:['x']});
-      else if(!ax && az) stopSigns.push({x, z, stopAxes:['z']});
-      else stopSigns.push({x, z, stopAxes:['x','z']});
+      else if(ax && !az) stopSigns.push({x, z, stopAxes:['x'], rhX:roadHalfX[ix], rhZ:roadHalfZ[iz]});
+      else if(!ax && az) stopSigns.push({x, z, stopAxes:['z'], rhX:roadHalfX[ix], rhZ:roadHalfZ[iz]});
+      else stopSigns.push({x, z, stopAxes:['x','z'], rhX:roadHalfX[ix], rhZ:roadHalfZ[iz]});
     }
   }
 
@@ -509,11 +573,12 @@ function generateCity(seed){
   stopLines = [];
   const stopLineW = 2.5;
   for(const tl of trafficLights){
+    // every traffic-light junction is arterial x arterial by construction
     for(const [axis,dir] of [['z',1],['z',-1],['x',1],['x',-1]]){
       const laneSign = correctLane(axis, dir);
-      const stopAt = (axis==='z'?tl.z:tl.x) - dir*ROAD_HALF;
+      const stopAt = (axis==='z'?tl.z:tl.x) - dir*ROAD_HALF_ARTERIAL;
       const crossCenter = axis==='z' ? tl.x : tl.z;
-      const crossFar = crossCenter + laneSign*ROAD_HALF;
+      const crossFar = crossCenter + laneSign*ROAD_HALF_ARTERIAL;
       const c1 = Math.min(crossCenter, crossFar), c2 = Math.max(crossCenter, crossFar);
       if(axis==='z') stopLines.push({x1:c1, x2:c2, z1:stopAt-stopLineW/2, z2:stopAt+stopLineW/2});
       else stopLines.push({x1:stopAt-stopLineW/2, x2:stopAt+stopLineW/2, z1:c1, z2:c2});
@@ -524,32 +589,32 @@ function generateCity(seed){
   // controls (only the axes in ss.stopAxes — the priority road through an
   // ax/az junction never gets a line painted across it), plus a sign pole
   // set back onto the curb corner, a little further from the line than the
-  // signalised junctions' heads so it doesn't crowd the painted line itself
+  // signalised junctions' heads so it doesn't crowd the painted line itself.
+  // A stop-sign junction can be asymmetric (an arterial crossing a minor
+  // street) so each approach needs its OWN street's width (for how far the
+  // stop line spans across its own lanes) and the CROSSING street's width
+  // (for how far back from the junction box the line has to sit).
   stopSignLines = [];
   stopSignPoles = [];
   for(const ss of stopSigns){
     for(const axis of ss.stopAxes){
+      const ownRoadHalf = axis==='z' ? ss.rhX : ss.rhZ;
+      const perpRoadHalf = axis==='z' ? ss.rhZ : ss.rhX;
       for(const dir of [1,-1]){
         const laneSign = correctLane(axis, dir);
-        const stopAt = (axis==='z'?ss.z:ss.x) - dir*ROAD_HALF;
+        const stopAt = (axis==='z'?ss.z:ss.x) - dir*perpRoadHalf;
         const crossCenter = axis==='z' ? ss.x : ss.z;
-        const crossFar = crossCenter + laneSign*ROAD_HALF;
+        const crossFar = crossCenter + laneSign*ownRoadHalf;
         const c1 = Math.min(crossCenter, crossFar), c2 = Math.max(crossCenter, crossFar);
         if(axis==='z') stopSignLines.push({x1:c1, x2:c2, z1:stopAt-stopLineW/2, z2:stopAt+stopLineW/2});
         else stopSignLines.push({x1:stopAt-stopLineW/2, x2:stopAt+stopLineW/2, z1:c1, z2:c2});
-        const curbPos = crossCenter + laneSign*(ROAD_HALF-4);
+        const curbPos = crossCenter + laneSign*(ownRoadHalf-4);
         const alongPos = stopAt - dir*6;
         const pos = axis==='z' ? {x:curbPos, z:alongPos} : {x:alongPos, z:curbPos};
         stopSignPoles.push({x:pos.x, z:pos.z, axis, stopKey: ss.x+','+ss.z+','+axis});
       }
     }
   }
-
-  // shared by crossings/signs/clocks below: a modest offset off a street's
-  // own centerline (for curb-mounted furniture) and a margin that keeps
-  // mid-block placements clear of every bounding intersection
-  const curbOff = ROAD_HALF - 4;
-  const furnitureMargin = ROAD_HALF + 10;
 
   // zebra crossings (UK-style, with Belisha beacons) are their own,
   // uncontrolled thing — NOT the same as a signal-controlled junction, so
@@ -561,14 +626,18 @@ function generateCity(seed){
     const axis = crossRnd()<0.5 ? 'z' : 'x';
     const lines = axis==='z' ? streetLinesX : streetLinesZ;
     const crossLines = axis==='z' ? streetLinesZ : streetLinesX;
-    const line = lines[Math.floor(crossRnd()*lines.length)];
+    const crossRH = axis==='z' ? roadHalfZ : roadHalfX;
+    const li = Math.floor(crossRnd()*lines.length);
+    const line = lines[li];
+    const roadHalf = (axis==='z' ? roadHalfX : roadHalfZ)[li];
+    const furnitureMargin = roadHalf + 10;
     const ci = Math.floor(crossRnd()*(crossLines.length-1));
-    const blockStart = crossLines[ci]+furnitureMargin, blockEnd = crossLines[ci+1]-furnitureMargin;
+    const blockStart = crossLines[ci]+Math.max(crossRH[ci]+10, furnitureMargin), blockEnd = crossLines[ci+1]-Math.max(crossRH[ci+1]+10, furnitureMargin);
     const along = blockStart + crossRnd()*(blockEnd-blockStart);
     // the crossing's own axis field means "the axis pedestrians walk
     // along", i.e. it's placed across the OTHER street (see buildZebraQuads)
     const pos = axis==='z' ? {x:line, z:along} : {x:along, z:line};
-    crossings.push({x:pos.x, z:pos.z, axis: axis==='z'?'x':'z'});
+    crossings.push({x:pos.x, z:pos.z, axis: axis==='z'?'x':'z', roadHalf});
   }
 
   // scattered road signs — purely decorative street furniture, placed
@@ -584,9 +653,14 @@ function generateCity(seed){
     const axis = signRnd()<0.5 ? 'z' : 'x';
     const lines = axis==='z' ? streetLinesX : streetLinesZ;
     const crossLines = axis==='z' ? streetLinesZ : streetLinesX;
-    const line = lines[Math.floor(signRnd()*lines.length)];
+    const crossRH = axis==='z' ? roadHalfZ : roadHalfX;
+    const li = Math.floor(signRnd()*lines.length);
+    const line = lines[li];
+    const roadHalf = (axis==='z' ? roadHalfX : roadHalfZ)[li];
+    const curbOff = roadHalf - 4;
+    const furnitureMargin = roadHalf + 10;
     const ci = Math.floor(signRnd()*(crossLines.length-1));
-    const blockStart = crossLines[ci]+furnitureMargin, blockEnd = crossLines[ci+1]-furnitureMargin;
+    const blockStart = crossLines[ci]+Math.max(crossRH[ci]+10, furnitureMargin), blockEnd = crossLines[ci+1]-Math.max(crossRH[ci+1]+10, furnitureMargin);
     const along = blockStart + signRnd()*(blockEnd-blockStart);
     const cross = line + (signRnd()<0.5?-curbOff:curbOff);
     const pos = axis==='z' ? {x:cross, z:along} : {x:along, z:cross};
@@ -603,9 +677,14 @@ function generateCity(seed){
     const axis = clockRnd()<0.5 ? 'z' : 'x';
     const lines = axis==='z' ? streetLinesX : streetLinesZ;
     const crossLines = axis==='z' ? streetLinesZ : streetLinesX;
-    const line = lines[Math.floor(clockRnd()*lines.length)];
+    const crossRH = axis==='z' ? roadHalfZ : roadHalfX;
+    const li = Math.floor(clockRnd()*lines.length);
+    const line = lines[li];
+    const roadHalf = (axis==='z' ? roadHalfX : roadHalfZ)[li];
+    const curbOff = roadHalf - 4;
+    const furnitureMargin = roadHalf + 10;
     const ci = Math.floor(clockRnd()*(crossLines.length-1));
-    const blockStart = crossLines[ci]+furnitureMargin, blockEnd = crossLines[ci+1]-furnitureMargin;
+    const blockStart = crossLines[ci]+Math.max(crossRH[ci]+10, furnitureMargin), blockEnd = crossLines[ci+1]-Math.max(crossRH[ci+1]+10, furnitureMargin);
     const along = blockStart + clockRnd()*(blockEnd-blockStart);
     const cross = line + (clockRnd()<0.5?-curbOff:curbOff);
     const pos = axis==='z' ? {x:cross, z:along} : {x:along, z:cross};
@@ -655,11 +734,11 @@ function generateCity(seed){
     if(roadAxis==='z'){
       const ix = Math.floor(swRnd()*streetLinesX.length);
       const iz = Math.floor(swRnd()*BLOCKS_Z);
-      sidewalkBeats.push({x:streetLinesX[ix]+side*(ROAD_HALF-5), z:cellCenter(iz,BLOCKS_Z), axis:'z', hasDog:swRnd()<0.4});
+      sidewalkBeats.push({x:streetLinesX[ix]+side*(roadHalfX[ix]-5), z:cellCenter(iz,BLOCKS_Z), axis:'z', hasDog:swRnd()<0.4});
     } else {
       const iz = Math.floor(swRnd()*streetLinesZ.length);
       const ix = Math.floor(swRnd()*BLOCKS_X);
-      sidewalkBeats.push({x:cellCenter(ix,BLOCKS_X), z:streetLinesZ[iz]+side*(ROAD_HALF-5), axis:'x', hasDog:swRnd()<0.4});
+      sidewalkBeats.push({x:cellCenter(ix,BLOCKS_X), z:streetLinesZ[iz]+side*(roadHalfZ[iz]-5), axis:'x', hasDog:swRnd()<0.4});
     }
   }
 
@@ -670,10 +749,10 @@ function generateCity(seed){
   // side, with the wall on the other) are one-way, running as a loop
   // around the city rather than full two-way streets
   oneWayStreets = [
-    {axis:'z', line: streetLinesX[0], dir:-1},
-    {axis:'z', line: streetLinesX[BLOCKS_X], dir:1},
-    {axis:'x', line: streetLinesZ[0], dir:1},
-    {axis:'x', line: streetLinesZ[BLOCKS_Z], dir:-1}
+    {axis:'z', line: streetLinesX[0], dir:-1, roadHalf: roadHalfX[0]},
+    {axis:'z', line: streetLinesX[BLOCKS_X], dir:1, roadHalf: roadHalfX[BLOCKS_X]},
+    {axis:'x', line: streetLinesZ[0], dir:1, roadHalf: roadHalfZ[0]},
+    {axis:'x', line: streetLinesZ[BLOCKS_Z], dir:-1, roadHalf: roadHalfZ[BLOCKS_Z]}
   ];
 
   // big blue British-style one-way plates mounted on the building-side
@@ -683,7 +762,7 @@ function generateCity(seed){
   for(const ow of oneWayStreets){
     const range = ow.axis==='z' ? worldHalfZ : worldHalfX;
     const wallSign = ow.line < 0 ? -1 : 1;
-    const curbCross = ow.line - wallSign*curbOff;
+    const curbCross = ow.line - wallSign*(ow.roadHalf-4);
     for(let k=-2;k<=2;k++){
       const along = k*range*0.4;
       const pos = ow.axis==='z' ? {x:curbCross, z:along} : {x:along, z:curbCross};
@@ -3554,10 +3633,11 @@ function trafficLightHeadQuads(px, pz, phase, axis, cam){
 // anywhere near its own line of sight
 function buildTrafficLightQuads(tl, cam){
   const phaseZ = trafficPhase('z', worldTime), phaseX = trafficPhase('x', worldTime);
-  // posts belong at the curb, not in the middle of the carriageway — this
-  // was sitting well inside the road (offset 12, when the road itself is
-  // ROAD_HALF=42 wide), effectively planted in the traffic lane
-  const off = ROAD_HALF - 4;
+  // posts belong at the curb, not in the middle of the carriageway. Every
+  // traffic-light junction is arterial x arterial by construction (see
+  // the road-hierarchy grid in generateCity), so both axes use the same
+  // arterial road-half here.
+  const off = ROAD_HALF_ARTERIAL - 4;
   return [
     ...trafficLightHeadQuads(tl.x+off, tl.z-off, phaseZ, 'z', cam),
     ...trafficLightHeadQuads(tl.x+off, tl.z+off, phaseZ, 'z', cam),
@@ -3573,11 +3653,11 @@ function buildTrafficLightQuads(tl, cam){
 // the crosswalk's own width should stay a modest fixed size (was
 // ROAD_HALF-6, i.e. nearly the whole road, reading as oversized and
 // overlapping the perpendicular crossing at the same junction)
-function buildZebraQuads(sx, sz, axis){
+function buildZebraQuads(sx, sz, axis, roadHalf){
   const quads = [];
   const crossWidth = 18;
   const stripeW = 5, gap = 5;
-  const spanTarget = ROAD_HALF*2 + 6;
+  const spanTarget = roadHalf*2 + 6;
   const n = Math.max(3, Math.round(spanTarget/(stripeW+gap)));
   const totalSpan = n*stripeW + (n-1)*gap;
   const start = -totalSpan/2;
@@ -3816,7 +3896,7 @@ function pedestrianPositions(){
   for(let i=0;i<crossings.length;i++){
     const cr = crossings[i];
     const {ph, wave, movingBack} = walkPhase(i, worldTime, 7, 9);
-    const span = ROAD_HALF*2 - 10;
+    const span = cr.roadHalf*2 - 10;
     const off = wave * span/2;
     const pos = cr.axis==='z' ? {x:cr.x+off, z:cr.z-8} : {x:cr.x-8, z:cr.z+off};
     const baseFacing = cr.axis==='z' ? Math.PI/2 : 0;
@@ -3840,7 +3920,7 @@ function dogPositions(){
   for(let i=0;i<crossings.length;i++){
     const cr = crossings[i];
     const {ph, wave, movingBack} = walkPhase(i+50, worldTime*1.3+3, 5, 4);
-    const span = ROAD_HALF*2 - 16;
+    const span = cr.roadHalf*2 - 16;
     const off = wave * span/2;
     const pos = cr.axis==='z' ? {x:cr.x+off, z:cr.z-4} : {x:cr.x-4, z:cr.z+off};
     const baseFacing = cr.axis==='z' ? Math.PI/2 : 0;
@@ -3904,9 +3984,12 @@ function buildBarrierQuads(px, pz, barrierT, side){
 function buildLevelCrossingBarriers(barrierT){
   const lc = levelCrossing;
   const quads = [];
+  // levelCrossing always sits on streetLinesX[4] — a minor street, not
+  // one of the (every-3rd) arterial lines — so its own fixed road-half
+  // is always correct here, no per-street lookup needed
   for(const z of [lc.z-16, lc.z+16]){
-    quads.push(...buildBarrierQuads(lc.x-(ROAD_HALF-3), z, barrierT, 1));
-    quads.push(...buildBarrierQuads(lc.x+(ROAD_HALF-3), z, barrierT, -1));
+    quads.push(...buildBarrierQuads(lc.x-(ROAD_HALF_MINOR-3), z, barrierT, 1));
+    quads.push(...buildBarrierQuads(lc.x+(ROAD_HALF_MINOR-3), z, barrierT, -1));
   }
   return quads;
 }
@@ -4119,7 +4202,7 @@ function drawScene(){
     if(dist2(cam.x,cam.z,mx,mz) > markRangeSq) continue;
     const pts = [[m.x1,0.15,m.z1],[m.x2,0.15,m.z1],[m.x2,0.15,m.z2],[m.x1,0.15,m.z2]];
     const proj = projectFace(pts, cam);
-    if(proj) polyFill(proj, 'rgba(224,222,208,0.8)', null);
+    if(proj) polyFill(proj, m.color || 'rgba(224,222,208,0.8)', null);
   }
 
   for(const sl of stopLines){
@@ -4147,7 +4230,7 @@ function drawScene(){
   // zebra crossings — flat ground decals like the road markings above
   for(const cr of crossings){
     if(dist2(cam.x,cam.z,cr.x,cr.z) > markRangeSq) continue;
-    for(const q of buildZebraQuads(cr.x, cr.z, cr.axis)){
+    for(const q of buildZebraQuads(cr.x, cr.z, cr.axis, cr.roadHalf)){
       const proj = projectFace(q.pts, cam);
       if(proj) polyFill(proj, q.color, null);
     }
@@ -4251,8 +4334,8 @@ function drawScene(){
   for(const cr of crossings){
     const d = dist2(cam.x,cam.z,cr.x,cr.z);
     if(d > RENDER_DIST*RENDER_DIST) continue;
-    const b1 = cr.axis==='z' ? {x:cr.x-ROAD_HALF+2, z:cr.z} : {x:cr.x, z:cr.z-ROAD_HALF+2};
-    const b2 = cr.axis==='z' ? {x:cr.x+ROAD_HALF-2, z:cr.z} : {x:cr.x, z:cr.z+ROAD_HALF-2};
+    const b1 = cr.axis==='z' ? {x:cr.x-cr.roadHalf+2, z:cr.z} : {x:cr.x, z:cr.z-cr.roadHalf+2};
+    const b2 = cr.axis==='z' ? {x:cr.x+cr.roadHalf-2, z:cr.z} : {x:cr.x, z:cr.z+cr.roadHalf-2};
     for(const bpos of [b1,b2]){
       for(const f of buildBeaconQuads(bpos.x, bpos.z)){
         allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
