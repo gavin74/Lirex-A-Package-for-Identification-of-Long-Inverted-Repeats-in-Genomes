@@ -1002,13 +1002,31 @@ function spawnStreetCar(color, speed, type){
   return c;
 }
 
+// how many through-lanes run each direction on the street identified by
+// `lineValue` (an exact member of streetLinesX/Z) — 3 on an arterial, 1 on
+// a minor street. car.lane itself (see snapToLane/changeLane) is this
+// magnitude TIMES the correct-side sign, e.g. a car two lanes out on the
+// correct side of an arterial has lane === correctLane(...)*2.
+function laneCountAt(axis, lineValue){
+  const lines = axis==='z' ? streetLinesX : streetLinesZ;
+  const rh = axis==='z' ? roadHalfX : roadHalfZ;
+  const idx = lines.indexOf(lineValue);
+  return (idx>=0 && rh[idx]===ROAD_HALF_ARTERIAL) ? ARTERIAL_LANES_PER_SIDE : 1;
+}
+
 // AI traffic used to drive dead-center down every street with no lane
 // offset at all — two cars passing each other looked like oncoming
 // traffic on the wrong side, because there was no side. This snaps a car
 // onto its correct-hand lane at the given intersection point, called at
-// spawn and again every time it turns or reverses.
+// spawn and again every time it turns or reverses. On an arterial street
+// it picks one of the 3 through-lanes at random each time it commits to a
+// street, rather than always hugging the innermost one.
 function snapToLane(car, lineX, lineZ){
-  const off = correctLane(car.axis, car.dir) * LANE_OFFSET;
+  const lineVal = car.axis==='z' ? lineX : lineZ;
+  const laneCount = laneCountAt(car.axis, lineVal);
+  const mag = laneCount<=1 ? 1 : 1+Math.floor(Math.random()*laneCount);
+  car.lane = correctLane(car.axis, car.dir) * mag;
+  const off = car.lane * LANE_OFFSET;
   if(car.axis==='z'){ car.x = lineX + off; car.laneHome = car.x; }
   else { car.z = lineZ + off; car.laneHome = car.z; }
 }
@@ -1463,7 +1481,45 @@ const SFX = (function(){
     sirenOsc = null; sirenLfo = null; sirenGain = null;
   }
 
-  return { crash, bust, gunshot, horn, screech, sirenStart, sirenStop };
+  // a crack of thunder — a short sharp high-passed crack for the strike
+  // itself, then a longer, lower rumble that wanders slightly as it
+  // decays (two detuned sub oscillators beating against each other)
+  // rather than one clean tone, so it reads as a rolling rumble
+  function thunder(far){
+    const ac = ctx();
+    if(!ac || Engine.isMuted) return;
+    const now = ac.currentTime;
+    const vol = far ? 0.22 : 0.45;
+
+    const crackLen = Math.floor(ac.sampleRate*0.1);
+    const cbuf = ac.createBuffer(1, crackLen, ac.sampleRate);
+    const cdata = cbuf.getChannelData(0);
+    for(let i=0;i<crackLen;i++) cdata[i] = (Math.random()*2-1) * Math.pow(1 - i/crackLen, 2);
+    const crack = ac.createBufferSource(); crack.buffer = cbuf;
+    const cf = ac.createBiquadFilter(); cf.type = 'highpass'; cf.frequency.value = 1200;
+    const cg = ac.createGain(); cg.gain.setValueAtTime(vol*0.8, now);
+    crack.connect(cf); cf.connect(cg); cg.connect(ac.destination);
+    crack.start(now);
+
+    const rumbleStart = now + (far ? 0.25 : 0.08);
+    const rumbleDur = 1.8 + Math.random()*1.4;
+    const rg = ac.createGain();
+    rg.gain.setValueAtTime(0.0001, rumbleStart);
+    rg.gain.linearRampToValueAtTime(vol, rumbleStart+0.25);
+    rg.gain.exponentialRampToValueAtTime(0.001, rumbleStart+rumbleDur);
+    rg.connect(ac.destination);
+    for(const detune of [1, 1.035]){
+      const o = ac.createOscillator(); o.type = 'sawtooth';
+      const baseHz = (30 + Math.random()*14) * detune;
+      o.frequency.setValueAtTime(baseHz, rumbleStart);
+      o.frequency.exponentialRampToValueAtTime(baseHz*0.5, rumbleStart+rumbleDur);
+      const of = ac.createBiquadFilter(); of.type = 'lowpass'; of.frequency.value = 220;
+      o.connect(of); of.connect(rg);
+      o.start(rumbleStart); o.stop(rumbleStart+rumbleDur+0.1);
+    }
+  }
+
+  return { crash, bust, gunshot, horn, screech, sirenStart, sirenStop, thunder };
 })();
 
 // ---------------------------------------------------------------
@@ -1635,7 +1691,22 @@ function changeLane(side){
   // your own right should always mean your own right, independent of
   // which side of the road counts as "correct".
   const rightSign = player.dir * (player.axis==='z' ? 1 : -1);
-  player.lane = side==='left' ? -rightSign : rightSign;
+  const laneCount = laneCountAt(player.axis, player.streetCoord);
+  if(laneCount <= 1){
+    player.lane = side==='left' ? -rightSign : rightSign;
+  } else {
+    // an arterial has real lanes to step through rather than just the one
+    // side to flip to. r is "how many lane-widths right of centerline",
+    // negative meaning left — stepping by one at a time skips straight
+    // over r=0 (the center turn lane) since that's for turning across
+    // traffic under its own signal, not a lane to cruise in or land in
+    // by stepping past it.
+    let r = player.lane * rightSign;
+    r += side==='right' ? 1 : -1;
+    if(r === 0) r += side==='right' ? 1 : -1;
+    r = clamp(r, -laneCount, laneCount);
+    player.lane = r * rightSign;
+  }
   setSignal(player, side, 0.8);
 }
 
@@ -2644,36 +2715,50 @@ const WEATHER_KEYFRAMES = [
   { p:0.94, cloud:0.1,  rain:0 },
   { p:1.00, cloud:0.05, rain:0 }
 ];
-function weatherSample(p){
-  let a = WEATHER_KEYFRAMES[0], b = WEATHER_KEYFRAMES[WEATHER_KEYFRAMES.length-1];
-  for(let i=0;i<WEATHER_KEYFRAMES.length-1;i++){
-    if(p >= WEATHER_KEYFRAMES[i].p && p <= WEATHER_KEYFRAMES[i+1].p){ a=WEATHER_KEYFRAMES[i]; b=WEATHER_KEYFRAMES[i+1]; break; }
+function weatherSample(p, keyframes){
+  keyframes = keyframes || WEATHER_KEYFRAMES;
+  let a = keyframes[0], b = keyframes[keyframes.length-1];
+  for(let i=0;i<keyframes.length-1;i++){
+    if(p >= keyframes[i].p && p <= keyframes[i+1].p){ a=keyframes[i]; b=keyframes[i+1]; break; }
   }
   const span = b.p - a.p;
   const t = span > 0 ? smoothstep((p - a.p)/span) : 0;
   return { cloud: lerp(a.cloud,b.cloud,t), rain: lerp(a.rain,b.rain,t) };
 }
-// a fixed-length modulo repeated the exact same clear->cloudy->rain->clear
-// lap every 150s like clockwork — very noticeably periodic over a longer
-// play session. Each lap now gets its own randomized length and its own
-// randomized rain ceiling (so some laps stay cloudy and never really open
-// up, others go straight to a downpour), rolled the instant the previous
-// lap finishes rather than on any fixed schedule.
+// A fixed-length modulo repeated the exact same clear->cloudy->rain->clear
+// lap every 150s like clockwork — randomizing just the length and rain
+// ceiling (still here) wasn't enough on its own: every lap still traced
+// the exact same shaped curve, only stretched and scaled, which still
+// reads as "the same weather" repeating. Each lap now also gets its own
+// lightly jittered keyframe timing/cloud levels (endpoints pinned at 0/1
+// so laps still join up cleanly), and a real chance of skipping rain
+// altogether — a lap that stays cloudy, or even stays clear — rather than
+// a guaranteed shower every single cycle.
 let weatherClock = 0;
 let weatherLapStart = 0, weatherLapLength = WEATHER_LENGTH;
 let weatherLapIntensity = 1;
+let weatherLapKeyframes = WEATHER_KEYFRAMES;
 let cloudiness = 0.05, raininess = 0;
 function updateWeather(dt){
   weatherClock += dt;
   let elapsed = weatherClock - weatherLapStart;
   if(elapsed >= weatherLapLength){
     weatherLapStart += weatherLapLength;
-    weatherLapLength = WEATHER_LENGTH * (0.65 + Math.random()*0.9);
-    weatherLapIntensity = 0.35 + Math.random()*0.65;
+    weatherLapLength = WEATHER_LENGTH * (0.55 + Math.random()*1.3);
+    weatherLapIntensity = Math.random() < 0.25 ? 0 : 0.3 + Math.random()*0.7;
+    weatherLapKeyframes = WEATHER_KEYFRAMES.map((k,i,arr) => {
+      if(i===0 || i===arr.length-1) return k;
+      const jitter = (Math.random()-0.5)*0.06;
+      return {
+        p: clamp(k.p+jitter, arr[i-1].p+0.01, arr[i+1].p-0.01),
+        cloud: clamp(k.cloud+(Math.random()-0.5)*0.15, 0, 1),
+        rain: k.rain
+      };
+    });
     elapsed = weatherClock - weatherLapStart;
   }
   const p = elapsed / weatherLapLength;
-  const s = weatherSample(p);
+  const s = weatherSample(p, weatherLapKeyframes);
   cloudiness = s.cloud; raininess = s.rain * weatherLapIntensity;
 }
 
@@ -4111,6 +4196,30 @@ function drawClouds(){
   ctx.restore();
 }
 
+// lightning only strikes during a real downpour, not a light sprinkle —
+// a random wait between strikes, reset short whenever the rain isn't
+// heavy enough so a strike can't land the instant a downpour starts
+let lightningTimer = 4 + Math.random()*5;
+let lightningFlash = 0;
+function updateLightning(dt){
+  lightningFlash = Math.max(0, lightningFlash - dt*4.2);
+  if(raininess < 0.55){ lightningTimer = 3 + Math.random()*4; return; }
+  lightningTimer -= dt;
+  if(lightningTimer <= 0){
+    lightningTimer = 5 + Math.random()*12;
+    lightningFlash = 1;
+    SFX.thunder(Math.random() < 0.55);
+  }
+}
+// a bright flash across the whole frame, not just the sky band — a real
+// strike lights up the buildings and road too, not only the clouds above
+// them. Drawn last so nothing paints over it.
+function drawLightning(){
+  if(lightningFlash <= 0.01) return;
+  ctx.fillStyle = `rgba(235,240,255,${(lightningFlash*0.55).toFixed(3)})`;
+  ctx.fillRect(0,0,W,H);
+}
+
 // falling rain streaks as a screen-space overlay — deterministic per-index
 // positions animated by dayClock (never resets, so the fall is continuous
 // across restarts the same way the sky is), rather than any particle state.
@@ -4517,6 +4626,7 @@ function drawScene(){
 
   drawMoon();
   drawRain();
+  drawLightning();
 }
 
 // squared 3D distance from the camera to a face's centroid — used as the
@@ -4671,6 +4781,7 @@ function frame(t){
   lastT = t;
   updateWeather(dt); // also keeps advancing on the start screen, same as day/night
   updateDayNight(dt); // keeps advancing even on the start screen, gameState aside
+  updateLightning(dt);
   update(dt);
   if(player){
     drawScene();
