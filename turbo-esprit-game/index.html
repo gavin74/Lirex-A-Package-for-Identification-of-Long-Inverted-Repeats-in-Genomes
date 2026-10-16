@@ -26,11 +26,27 @@
   }
   #wrap{
     position:relative;width:100vw;height:100vh;
-    display:flex;align-items:center;justify-content:center;
+    display:flex;flex-direction:column;align-items:stretch;
     background:#000;
   }
-  canvas{display:block;image-rendering:pixelated;background:#3a4048}
-  #scene{position:relative}
+  canvas{display:block;background:#3a4048}
+  #scene{position:relative;width:100%;height:100%}
+
+  /* the windscreen view itself — a smaller window than the full page now,
+     like the original's, with the dashboard console filling the rest of
+     the screen below it rather than a couple of small HUD boxes floating
+     over the 3D view */
+  #viewport{
+    flex:1 1 auto;min-height:0;
+    display:flex;align-items:center;justify-content:center;
+    overflow:hidden;background:#000;
+    padding:10px 10px 4px;
+  }
+  #viewport #scene{
+    width:auto;height:100%;aspect-ratio:8/5;max-width:100%;
+    box-shadow:0 0 0 2px var(--panel-edge), 0 10px 30px rgba(0,0,0,.6);
+  }
+  #viewport canvas#c{width:100%;height:100%}
 
   /* faint CRT scanlines — static, purely atmospheric */
   #scanlines{
@@ -45,25 +61,33 @@
     mix-blend-mode:multiply;
   }
 
+  /* the dashboard console — a proper fascia across the bottom of the
+     screen like the original's, not a couple of small boxes floating
+     over the 3D view. A raised trim line separates it from the
+     windscreen above, same dark panel material the rest of the UI uses. */
   #hud{
-    position:absolute;left:0;right:0;top:0;
-    display:flex;justify-content:space-between;align-items:flex-start;
-    padding:8px 10px;pointer-events:none;
+    flex:0 0 auto;
+    display:flex;justify-content:space-between;align-items:center;
+    gap:14px;padding:10px clamp(10px,3vw,34px) calc(10px + env(safe-area-inset-bottom));
+    background:linear-gradient(180deg,#1b1c1e,#101112);
+    border-top:2px solid var(--panel-edge);
+    box-shadow:0 -8px 20px rgba(0,0,0,.45) inset;
     font-size:14px;letter-spacing:.5px;
     font-variant-numeric:tabular-nums;
   }
   .box{
-    background:rgba(8,9,10,.76);
+    background:rgba(8,9,10,.6);
     border:1px solid var(--panel-edge);
     padding:6px 10px;
     min-width:120px;
   }
   .row{display:flex;justify-content:space-between;gap:10px;margin:2px 0}
   .label{color:var(--dim);font-size:11px}
-  #minimap{border:1px solid var(--panel-edge);background:rgba(8,9,10,.76)}
-  .dialRow{display:flex;gap:6px}
-  .dialRow canvas{background:rgba(8,9,10,.5);border-radius:50%}
+  #minimap{border:1px solid var(--panel-edge);background:rgba(8,9,10,.76);flex:0 0 auto}
+  .dialRow{display:flex;gap:10px;flex:0 0 auto}
+  .dialRow canvas{background:radial-gradient(circle,#1c1d20,#101113);border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,.5)}
   .clickable{cursor:pointer;pointer-events:auto;color:var(--good)}
+  #hudSide{display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
 
   #banner{
     position:absolute;left:50%;top:38%;transform:translate(-50%,-50%);
@@ -106,27 +130,30 @@
 </head>
 <body>
 <div id="wrap">
-  <div id="scene">
-    <canvas id="c" width="800" height="500"></canvas>
-    <div id="hud">
-      <div class="box">
-        <div class="dialRow">
-          <canvas id="speedDial" width="76" height="76"></canvas>
-          <canvas id="revDial" width="76" height="76"></canvas>
-          <canvas id="fuelDial" width="76" height="76"></canvas>
-        </div>
-      </div>
-      <canvas id="minimap" width="140" height="140"></canvas>
-      <div class="box" style="text-align:right">
-        <div class="row"><span class="label">SCORE</span><span id="hudScore">0</span></div>
-        <div class="row"><span class="label">CAUGHT</span><span id="hudCaught">0</span></div>
-        <div class="row"><span class="label">SOUND (M)</span><span id="hudSound" class="clickable">ON</span></div>
+  <div id="viewport">
+    <div id="scene">
+      <canvas id="c" width="800" height="500"></canvas>
+      <div id="banner"><div class="msg" id="bannerMsg"></div></div>
+      <div id="scanlines"></div>
+    </div>
+  </div>
+  <div id="hud">
+    <div class="box">
+      <div class="dialRow">
+        <canvas id="speedDial" width="110" height="110"></canvas>
+        <canvas id="revDial" width="110" height="110"></canvas>
+        <canvas id="fuelDial" width="110" height="110"></canvas>
       </div>
     </div>
-    <div id="banner"><div class="msg" id="bannerMsg"></div></div>
-    <div id="scanlines"></div>
+    <canvas id="minimap" width="150" height="150"></canvas>
+    <div id="hudSide" class="box" style="text-align:right">
+      <div class="row"><span class="label">SCORE</span><span id="hudScore">0</span></div>
+      <div class="row"><span class="label">CAUGHT</span><span id="hudCaught">0</span></div>
+      <div class="row"><span class="label">SOUND (M)</span><span id="hudSound" class="clickable">ON</span></div>
+    </div>
+  </div>
 
-    <div id="overlay">
+  <div id="overlay">
       <div class="panel" id="panelStart">
         <h1>TURBO CIRCUIT</h1>
         <h2>a tribute to Turbo Esprit (ZX Spectrum, 1986)</h2>
@@ -158,7 +185,6 @@
         <div class="go" id="btnStart">PRESS ENTER OR CLICK TO DRIVE</div>
       </div>
     </div>
-  </div>
 </div>
 
 <script>
@@ -3036,17 +3062,68 @@ function buildBulletQuads(bu){
   ];
 }
 
+// rough footprint (half-width, nose, tail — same local convention every
+// vehicle builder below uses) per type, just for the shadow/headlight
+// ground decals — doesn't need to be exact, just in the right ballpark
+// so a bus doesn't get a motorbike-sized shadow
+const VEHICLE_FOOTPRINT = {
+  motorbike:[2.0,11,-11], ebike:[1.4,8,-8], ambulance:[8.5,19,-19],
+  firetruck:[9,21,-21], dumptruck:[10.5,15,-27], bus:[9,20,-20],
+  van:[7.8,16,-16], sports:[7.0,17,-14], police:[7.5,15,-15], car:[7.5,15,-15]
+};
+// a soft dark patch of ground under every vehicle — without it cars read
+// as floating a hair above the road instead of sitting on it. A ground
+// decal sitting almost exactly under its own car is the same situation
+// the traffic-light lamps and building windows ran into earlier: the
+// full-3D depth sort can easily call the car's own (taller, opaque) body
+// "closer" than the paper-thin shadow right beneath it, especially from
+// a close chase camera, painting the body over the shadow entirely.
+// depthBias forces the shadow to always win against its own car.
+// A large bias here would force the shadow to win against every part of
+// its own car regardless of true distance, including parts (the
+// windscreen, roof) that really are closer to a chase camera sitting
+// behind and above — that doesn't hide the shadow, it paints the shadow
+// tint across the whole car instead, which reads worse than just not
+// showing it. A ground shadow directly behind/under a car really is
+// optically hidden behind the car's own silhouette from a close chase
+// camera (same as it would be in any renderer); this small bias only
+// settles exact coplanar ties with the road surface itself, not that.
+const GROUND_DECAL_BIAS = -4;
+function buildVehicleShadow(car){
+  const d = VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car;
+  const shrink = 0.8;
+  const hw = d[0]*shrink, nose = d[1]*shrink, tail = d[2]*shrink;
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, lz){ return [car.x + (lx*c + lz*s), 0.08, car.z + (-lx*s + lz*c)]; }
+  return [{ pts:[tw(-hw,tail),tw(hw,tail),tw(hw,nose),tw(-hw,nose)], color:'rgba(5,6,8,0.38)', depthBias: GROUND_DECAL_BIAS }];
+}
+// a soft warm wash spilling onto the road ahead — headlights used to be
+// just lit cubes on the car body with no actual light reaching the
+// ground, which read as decoration rather than something illuminating
+// anything. Only worth drawing once it's actually dim enough to matter.
+function buildHeadlightBeam(car){
+  if(dayAmbient > 0.5) return [];
+  const alpha = clamp((0.5-dayAmbient)/0.35, 0, 1) * 0.16;
+  if(alpha < 0.01) return [];
+  const nose = (VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car)[1];
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, lz){ return [car.x + (lx*c + lz*s), 0.07, car.z + (-lx*s + lz*c)]; }
+  const nearW = 3, farW = 9, len = 42;
+  return [{ pts:[tw(-nearW,nose),tw(nearW,nose),tw(farW,nose+len),tw(-farW,nose+len)], color:`rgba(255,244,200,${alpha.toFixed(3)})`, depthBias: GROUND_DECAL_BIAS }];
+}
 function buildVehicleQuads(car){
-  if(car.type === 'motorbike') return buildMotorbikeQuads(car);
-  if(car.type === 'ebike') return buildEbikeQuads(car);
-  if(car.type === 'ambulance') return buildAmbulanceQuads(car);
-  if(car.type === 'firetruck') return buildFireTruckQuads(car);
-  if(car.type === 'dumptruck') return buildDumpTruckQuads(car);
-  if(car.type === 'bus') return buildBusQuads(car);
-  if(car.type === 'police') return buildPoliceQuads(car);
-  if(car.type === 'van') return buildVanQuads(car);
-  if(car.type === 'sports') return buildSportsQuads(car);
-  return buildCarQuads(car);
+  let body;
+  if(car.type === 'motorbike') body = buildMotorbikeQuads(car);
+  else if(car.type === 'ebike') body = buildEbikeQuads(car);
+  else if(car.type === 'ambulance') body = buildAmbulanceQuads(car);
+  else if(car.type === 'firetruck') body = buildFireTruckQuads(car);
+  else if(car.type === 'dumptruck') body = buildDumpTruckQuads(car);
+  else if(car.type === 'bus') body = buildBusQuads(car);
+  else if(car.type === 'police') body = buildPoliceQuads(car);
+  else if(car.type === 'van') body = buildVanQuads(car);
+  else if(car.type === 'sports') body = buildSportsQuads(car);
+  else body = buildCarQuads(car);
+  return [...buildVehicleShadow(car), ...buildHeadlightBeam(car), ...body];
 }
 
 // A small low-poly car: a chassis slab, a cabin/greenhouse with tinted
@@ -4553,7 +4630,7 @@ function drawScene(){
     // real, measurable frame cost for cars nobody could see anyway.
     if(car!==player && dist2(cam.x,cam.z,car.x,car.z) > RENDER_DIST*RENDER_DIST) continue;
     for(const f of buildVehicleQuads(car)){
-      allFaces.push({pts:f.pts, color:f.color, stroke:carStroke, width:1, depth:faceDepth(f.pts, cam)});
+      allFaces.push({pts:f.pts, color:f.color, stroke:carStroke, width:1, depth:faceDepth(f.pts, cam) + (f.depthBias||0)});
     }
   }
   for(const bu of bullets){
