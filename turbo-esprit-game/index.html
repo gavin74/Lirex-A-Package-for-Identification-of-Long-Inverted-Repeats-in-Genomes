@@ -272,7 +272,7 @@ let roadMarks = [];   // {x1,x2,z1,z2} dashed centerline segments
 let walls = [];        // perimeter wall segments, same shape as a building box
 let roundabouts = [];  // {x,z,r} — see ROUNDABOUTS_ENABLED
 let trafficLights = [];// {x,z}
-let crossings = [];    // {x,z,axis} zebra crossings paired with each traffic light
+let crossings = [];    // {x,z,axis} UK-style zebra crossings — uncontrolled, generated independently of trafficLights
 let signs = [];        // {x,z,type}
 let roadworks = [];    // {x1,x2,z1,z2,cones,signX,signZ} — collidable lane closures
 let sidewalkBeats = []; // {x,z,axis,hasDog} — where pedestrians/dogs walk the curb
@@ -473,12 +473,34 @@ function generateCity(seed){
   // so you actually run into one most drives instead of having to go
   // looking for it
   trafficLights = [];
-  crossings = [];
   for(const ix of [2,4,6]) for(const iz of [2,4,6]){
-    const tl = {x:streetLinesX[ix], z:streetLinesZ[iz]};
-    trafficLights.push(tl);
-    crossings.push({x:tl.x, z:tl.z-30, axis:'z'});
-    crossings.push({x:tl.x-30, z:tl.z, axis:'x'});
+    trafficLights.push({x:streetLinesX[ix], z:streetLinesZ[iz]});
+  }
+
+  // shared by crossings/signs/clocks below: a modest offset off a street's
+  // own centerline (for curb-mounted furniture) and a margin that keeps
+  // mid-block placements clear of every bounding intersection
+  const curbOff = ROAD_HALF - 4;
+  const furnitureMargin = ROAD_HALF + 10;
+
+  // zebra crossings (UK-style, with Belisha beacons) are their own,
+  // uncontrolled thing — NOT the same as a signal-controlled junction, so
+  // they're generated independently, scattered mid-block the same way
+  // signs/clocks are, rather than paired with every traffic light
+  crossings = [];
+  const crossRnd = mulberry32(seed + 5050);
+  for(let k=0;k<Math.round(16*AREA_SCALE);k++){
+    const axis = crossRnd()<0.5 ? 'z' : 'x';
+    const lines = axis==='z' ? streetLinesX : streetLinesZ;
+    const crossLines = axis==='z' ? streetLinesZ : streetLinesX;
+    const line = lines[Math.floor(crossRnd()*lines.length)];
+    const ci = Math.floor(crossRnd()*(crossLines.length-1));
+    const blockStart = crossLines[ci]+furnitureMargin, blockEnd = crossLines[ci+1]-furnitureMargin;
+    const along = blockStart + crossRnd()*(blockEnd-blockStart);
+    // the crossing's own axis field means "the axis pedestrians walk
+    // along", i.e. it's placed across the OTHER street (see buildZebraQuads)
+    const pos = axis==='z' ? {x:line, z:along} : {x:along, z:line};
+    crossings.push({x:pos.x, z:pos.z, axis: axis==='z'?'x':'z'});
   }
 
   // scattered road signs — purely decorative street furniture, placed
@@ -490,8 +512,6 @@ function generateCity(seed){
   // the road.
   signs = [];
   const signRnd = mulberry32(seed + 777);
-  const curbOff = ROAD_HALF - 4;
-  const furnitureMargin = ROAD_HALF + 10;
   for(let k=0;k<Math.round(14*AREA_SCALE);k++){
     const axis = signRnd()<0.5 ? 'z' : 'x';
     const lines = axis==='z' ? streetLinesX : streetLinesZ;
@@ -712,9 +732,16 @@ const SHAKE_DURATION = 0.3;
 let shakeTimer = 0; // camera shake on impact — not a physics engine, but it reads as one
 
 function spawnPlayerStart(){
-  // spawn at a street intersection, which is always clear of buildings
+  // spawn at a street intersection, which is always clear of buildings.
+  // One block in from the southern perimeter (not a fixed absolute
+  // offset) — a flat "150 units from the edge" used to land safely on
+  // the second street line in from the wall back when BLOCK was much
+  // smaller, but a fixed distance doesn't scale with block size: once
+  // blocks grew, 150 units was no longer even half a block, so it snapped
+  // back to the OUTERMOST perimeter line — spawning the player facing
+  // straight at the perimeter wall and its billboards.
   const x = nearestStreet(streetLinesX, 0);
-  const z = nearestStreet(streetLinesZ, -worldHalfZ+150);
+  const z = streetLinesZ[1];
   const car = makeCar(x, z, 0, '#e8e8e8', 220);
   car.type = 'sports';
   car.crashCooldown = 0;
