@@ -5315,10 +5315,29 @@ function drawScene(){
   }
 
   allFaces.sort((a,b)=>b.depth - a.depth);
+  // everything used to hard-cut at RENDER_DIST — fine for the simulation
+  // (nothing needs to exist past that), but visually every building, car
+  // and sign would snap into existence at exactly that boundary as the
+  // player approached, reading as obvious pop-in rather than something
+  // emerging from haze. f.depth is already the squared camera distance
+  // every per-type cull check above also uses, so this needs no new
+  // per-object bookkeeping: faces in the outer FADE_BAND of RENDER_DIST
+  // just fade their own color/stroke alpha in as they get closer.
+  const FADE_BAND = 0.22;
+  const fadeStart = RENDER_DIST * (1-FADE_BAND);
+  const fadeSpan = RENDER_DIST - fadeStart;
   for(const f of allFaces){
     const proj = projectFace(f.pts, cam);
     if(!proj) continue;
-    polyFill(proj, f.color, f.stroke, f.width);
+    let color = f.color, stroke = f.stroke;
+    if(color && !color.glow){
+      const dist = Math.sqrt(f.depth);
+      if(dist > fadeStart){
+        const t = clamp(1 - (dist-fadeStart)/fadeSpan, 0, 1);
+        if(t < 0.999){ color = fadeColor(color, t); stroke = fadeColor(stroke, t); }
+      }
+    }
+    polyFill(proj, color, stroke, f.width);
   }
 
   // billboard slogans, drawn as real canvas text on top of everything —
@@ -5423,6 +5442,19 @@ function faceDepth(pts, cam){
   const n = pts.length;
   const dx = sx/n-cam.x, dy = sy/n-cam.y, dz = sz/n-cam.z;
   return dx*dx + dy*dy + dz*dz;
+}
+
+// scales a plain 'rgb(...)'/'rgba(...)' string's own alpha by `alpha` —
+// used to fade distant faces in near RENDER_DIST (see the draw loop).
+// Anything that isn't a parseable color string (null stroke, etc.) is
+// returned unchanged rather than guessed at.
+function fadeColor(color, alpha){
+  if(!color || typeof color !== 'string') return color;
+  const m = color.match(/rgba?\(([^)]+)\)/);
+  if(!m) return color;
+  const parts = m[1].split(',').map(s => parseFloat(s));
+  const a = parts.length > 3 ? parts[3] : 1;
+  return `rgba(${parts[0]},${parts[1]},${parts[2]},${(a*alpha).toFixed(3)})`;
 }
 
 function drawMinimap(){
