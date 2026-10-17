@@ -279,6 +279,12 @@ const SPOT_RADIUS = 170;           // how close before the suspect notices you a
 const FLEE_SPEED_MULT = 1.25;      // speed boost once the suspect is fleeing
 const HAZARD_COOLDOWN = 1.0;       // min seconds between hazard penalties, so lingering near
                                     // one doesn't reapply the penalty every single frame
+// roadworks-ramp jump physics — a simple vertical hop, not real rigid-body
+// flight: GRAVITY pulls player.vy down each frame, RAMP_VY_MIN/MAX scale
+// the launch impulse by how fast the player hit the ramp (a crawl barely
+// hops, flooring it launches a real jump)
+const GRAVITY = 42;
+const RAMP_VY_MIN = 9, RAMP_VY_MAX = 30;
 const LANE_OFFSET = 16;            // distance of each lane from the street centerline
 const LANE_SPEED = 70;             // lateral units/sec when changing lanes
 const TURN_RATE = 3.6;             // rad/sec every car's visual heading animates at —
@@ -854,10 +860,12 @@ function generateCity(seed){
     clocks.push({x:pos.x, z:pos.z, facing: clockFacings[Math.floor(clockRnd()*clockFacings.length)]});
   }
 
-  // a couple of midblock lane closures — collidable for the player, and
-  // now AI traffic swerves a lane over to clear them too (see
-  // roadworksAvoidOffset), the same lateral-nudge idiom used for the
-  // roundabouts below
+  // a couple of midblock "roadworks" — AI traffic still swerves a lane
+  // over to clear them (see obstacleAvoidOffset), same lateral-nudge
+  // idiom the roundabouts below use, but the player drives straight at
+  // one instead: it's a ramp, not a closure, and launches the player
+  // briefly airborne on the way over (see the roadworks loop in
+  // updatePlayer) rather than blocking the lane.
   roadworks = [];
   const rwRnd = mulberry32(seed + 999);
   for(let k=0;k<Math.round(2*AREA_SCALE);k++){
@@ -874,12 +882,16 @@ function generateCity(seed){
       ? {x1:cross+laneCenter-9, x2:cross+laneCenter+9, z1:mid-len/2, z2:mid+len/2}
       : {x1:mid-len/2, x2:mid+len/2, z1:cross+laneCenter-9, z2:cross+laneCenter+9};
     zone.axis = axis; zone.cross = cross; zone.mid = mid; zone.laneCenter = laneCenter; zone.halfLen = len/2;
+    // a cone pair marking each shoulder of the ramp, not blocking the
+    // driving line down the middle the way the old 4-across row did
     zone.cones = [];
-    for(let c=0;c<4;c++){
-      const t = c/3;
+    for(const t of [0,1]){
       zone.cones.push(axis==='z'
-        ? {x:(zone.x1+zone.x2)/2, z:zone.z1 + t*(zone.z2-zone.z1)}
-        : {x:zone.x1 + t*(zone.x2-zone.x1), z:(zone.z1+zone.z2)/2});
+        ? {x:zone.x1-2, z:zone.z1 + t*(zone.z2-zone.z1)}
+        : {x:zone.x1 + t*(zone.x2-zone.x1), z:zone.z1-2});
+      zone.cones.push(axis==='z'
+        ? {x:zone.x2+2, z:zone.z1 + t*(zone.z2-zone.z1)}
+        : {x:zone.x1 + t*(zone.x2-zone.x1), z:zone.z2+2});
     }
     zone.signX = axis==='z' ? cross+laneCenter : zone.x1-10;
     zone.signZ = axis==='z' ? zone.z1-10 : cross+laneCenter;
@@ -1089,6 +1101,7 @@ function spawnPlayerStart(){
   // second, before the player has touched a key
   car.laneOffset = LANE_OFFSET;
   car.x = x + LANE_OFFSET;
+  car.y = 0; car.vy = 0; car.airborne = false;
   return car;
 }
 
@@ -2087,17 +2100,55 @@ function updatePlayer(dt){
   if(player.axis==='z'){ nz = player.z + player.dir*player.speed*dt; nx = fixedCoord; }
   else { nx = player.x + player.dir*player.speed*dt; nz = fixedCoord; }
 
+  // roadworks are ramps now (see where they're generated): crossing one's
+  // midpoint while actually lined up with its lane launches the player
+  // briefly airborne, scaled by how fast they hit it, rather than
+  // blocking the lane the way they used to
+  if(!player.airborne){
+    const forward = player.axis==='z' ? player.z : player.x;
+    const nextForward = player.axis==='z' ? nz : nx;
+    for(const rw of roadworks){
+      if(rw.axis !== player.axis) continue;
+      if(Math.abs(fixedCoord - (rw.cross+rw.laneCenter)) > 10) continue;
+      if((forward-rw.mid)*(nextForward-rw.mid) > 0) continue; // hasn't reached the midpoint this frame
+      const speedFrac = clamp(Math.abs(player.speed)/player.maxSpeed, 0, 1);
+      player.vy = RAMP_VY_MIN + (RAMP_VY_MAX-RAMP_VY_MIN)*speedFrac;
+      player.airborne = true;
+      showBanner('AIRBORNE!', 0.6);
+      break;
+    }
+  }
+
   const CAR_R = 9;
 
   // axis-separated collision so the car slides along walls instead of
-  // freezing in place when it grazes a building
+  // freezing in place when it grazes a building — skipped entirely while
+  // airborne, same as a real jump clearing whatever's on the ground below
   let hit = false;
-  let rx = player.x, rz = player.z;
-  if(collideWorld(nx, rz, CAR_R)) hit = true; else rx = nx;
-  if(collideWorld(rx, nz, CAR_R)) hit = true; else rz = nz;
+  let rx, rz;
+  if(player.airborne){
+    rx = nx; rz = nz;
+  } else {
+    rx = player.x; rz = player.z;
+    if(collideWorld(nx, rz, CAR_R)) hit = true; else rx = nx;
+    if(collideWorld(rx, nz, CAR_R)) hit = true; else rz = nz;
+  }
 
   player.x = clamp(rx, -worldHalfX+20, worldHalfX-20);
   player.z = clamp(rz, -worldHalfZ+20, worldHalfZ-20);
+
+  // gravity while airborne — a simple vertical hop, not rigid-body flight;
+  // lands (and resumes normal ground collision above) the instant y
+  // returns to 0
+  if(player.airborne){
+    player.y += player.vy*dt;
+    player.vy -= GRAVITY*dt;
+    if(player.y <= 0){
+      player.y = 0; player.vy = 0; player.airborne = false;
+      shakeTimer = Math.max(shakeTimer, SHAKE_DURATION*0.5);
+      SFX.screech();
+    }
+  }
 
   player.crashCooldown -= dt;
   if(hit){
@@ -2145,20 +2196,18 @@ function collideBuildings(x, z, r){
   return null;
 }
 
-// buildings, the two experimental obstacle types that only the player
-// collides with (AI traffic drives straight through both — see the
-// comments where roundabouts/roadworks are generated), and now other
-// vehicles too — the player used to drive straight through traffic
+// buildings, roundabouts (an experimental obstacle type only the player
+// collides with — AI traffic drives straight through, see the comment
+// where they're generated), and other vehicles too — the player used to
+// drive straight through traffic. Roadworks are NOT here: they're ramps
+// now, not a closure, handled by the launch check in updatePlayer instead
+// of blocking the lane (see where they're generated).
 function collideWorld(x, z, r){
   if(collideBuildings(x,z,r)) return true;
   if(ROUNDABOUTS_ENABLED){
     for(const rb of roundabouts){
       if(dist2(x,z,rb.x,rb.z) < (rb.r+r)*(rb.r+r)) return true;
     }
-  }
-  for(const rw of roadworks){
-    const cx = clamp(x, rw.x1, rw.x2), cz = clamp(z, rw.z1, rw.z2);
-    if(dist2(x,z,cx,cz) < r*r) return true;
   }
   for(const m of medians){
     const cx = clamp(x, m.x1, m.x2), cz = clamp(z, m.z1, m.z2);
@@ -2234,7 +2283,11 @@ function checkOilSlick(car, dt){
 // smoothstep shape the day/night and weather keyframes already ease with
 function obstacleAvoidOffset(car){
   const forward = car.axis==='z' ? car.z : car.x;
-  for(const rw of roadworks){
+  // AI traffic still swerves clear of a roadworks zone — it can't jump —
+  // but the player needs to line UP with one to use it as a ramp, so it
+  // never nudges the player's own lane away from it (see the launch check
+  // in updatePlayer instead)
+  if(car !== player) for(const rw of roadworks){
     if(rw.axis !== car.axis) continue;
     const sideOffset = car.laneHome - rw.cross;
     if(Math.sign(sideOffset) !== Math.sign(rw.laneCenter)) continue;
@@ -3601,9 +3654,14 @@ function buildSportsQuads(car){
   // snapping to a new heading
   const roll = car.roll || 0;
   const rs = Math.sin(roll), rc = Math.cos(roll);
+  // car.y is only ever set on the player, and only nonzero mid-roadworks
+  // jump (see updatePlayer) — the shadow decal underneath is built
+  // separately and stays pinned to the ground, so lifting just the body
+  // here is what actually reads as the car leaving the road
+  const jumpY = car.y || 0;
   function tw(lx, ly, lz){
     const rx = lx*rc - ly*rs, ry = lx*rs + ly*rc;
-    return [car.x + (rx*c + lz*s), ry, car.z + (-rx*s + lz*c)];
+    return [car.x + (rx*c + lz*s), ry+jumpY, car.z + (-rx*s + lz*c)];
   }
 
   const rgb = carColorRGB(car.color);
@@ -4480,8 +4538,32 @@ function buildConeQuads(cx, cz){
   quads.push({pts:[[cx-baseR*0.6,by0,cz],[cx-topR*1.3,by1,cz],[cx+topR*1.3,by1,cz],[cx+baseR*0.6,by0,cz]], color:white});
   return quads;
 }
+// a simple ridge-shaped ramp: ground level at both ends of the zone,
+// rising to a peak in the middle, so it launches the player (see the
+// roadworks loop in updatePlayer) whichever direction they drive
+// through it — ramps replace the old lane-closure cones down the
+// driving line, which used to just block the lane outright
+const RAMP_H = 7;
+const RAMP_UP = 'rgb(224,170,40)', RAMP_DOWN = 'rgb(188,134,24)';
+const RAMP_EDGE = 'rgb(28,28,30)', RAMP_SIDE = 'rgb(150,112,28)';
 function buildRoadworksQuads(zone){
   const quads = [];
+  const {x1,x2,z1,z2,axis} = zone;
+  if(axis === 'z'){
+    const zMid = (z1+z2)/2;
+    quads.push({pts:[[x1,0,z1],[x2,0,z1],[x2,RAMP_H,zMid],[x1,RAMP_H,zMid]], color:RAMP_UP});
+    quads.push({pts:[[x1,RAMP_H,zMid],[x2,RAMP_H,zMid],[x2,0,z2],[x1,0,z2]], color:RAMP_DOWN});
+    quads.push({pts:[[x1,RAMP_H,zMid-0.4],[x2,RAMP_H,zMid-0.4],[x2,RAMP_H,zMid+0.4],[x1,RAMP_H,zMid+0.4]], color:RAMP_EDGE});
+    quads.push({pts:[[x1,0,z1],[x1,RAMP_H,zMid],[x1,0,z2]], color:RAMP_SIDE});
+    quads.push({pts:[[x2,0,z2],[x2,RAMP_H,zMid],[x2,0,z1]], color:RAMP_SIDE});
+  } else {
+    const xMid = (x1+x2)/2;
+    quads.push({pts:[[x1,0,z1],[x1,0,z2],[xMid,RAMP_H,z2],[xMid,RAMP_H,z1]], color:RAMP_UP});
+    quads.push({pts:[[xMid,RAMP_H,z1],[xMid,RAMP_H,z2],[x2,0,z2],[x2,0,z1]], color:RAMP_DOWN});
+    quads.push({pts:[[xMid-0.4,RAMP_H,z1],[xMid-0.4,RAMP_H,z2],[xMid+0.4,RAMP_H,z2],[xMid+0.4,RAMP_H,z1]], color:RAMP_EDGE});
+    quads.push({pts:[[x1,0,z1],[xMid,RAMP_H,z1],[x2,0,z1]], color:RAMP_SIDE});
+    quads.push({pts:[[x2,0,z2],[xMid,RAMP_H,z2],[x1,0,z2]], color:RAMP_SIDE});
+  }
   for(const cone of zone.cones) quads.push(...buildConeQuads(cone.x, cone.z));
   quads.push(...buildSignQuads({x:zone.signX, z:zone.signZ, axis:zone.axis, type:'roadworks'}));
   return quads;
@@ -4949,7 +5031,10 @@ function drawScene(){
     cam = {
       x: player.x - Math.sin(player.heading)*camPreset.back + (Math.random()*2-1)*shakeMag,
       z: player.z - Math.cos(player.heading)*camPreset.back + (Math.random()*2-1)*shakeMag,
-      y: camPreset.height + (Math.random()*2-1)*shakeMag*0.5,
+      // rises partway with a roadworks-ramp jump (player.y) so a launch
+      // actually reads as the car leaving the ground instead of the
+      // camera staying dead level while the body floats up in front of it
+      y: camPreset.height + (player.y||0)*0.6 + (Math.random()*2-1)*shakeMag*0.5,
       heading: player.heading,
       pitch: camPreset.pitch
     };
