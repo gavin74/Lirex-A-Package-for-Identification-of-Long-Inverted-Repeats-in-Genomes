@@ -5516,25 +5516,45 @@ function drawMinimap(){
   dot(player.x, player.z, '#ffffff', 3);
 
   // a compass: the map itself is always north-up (screen y = oz - z*scale,
-  // never rotated to face the player), so "N" at the top is a fixed label,
-  // plus a small heading arrow on the player's own dot showing which way
-  // they're actually facing — heading 0 is north and increases clockwise
-  // (see cardinalHeading), which maps directly onto this screen's axes:
+  // never rotated to face the player), so N/S/E/W at the four edges are
+  // fixed labels (a single "N" at the top read as too easy to miss/not
+  // register as an actual compass), plus an arrowhead — not just a thin
+  // line — on the player's own dot showing which way they're actually
+  // facing. Heading 0 is north and increases clockwise (see
+  // cardinalHeading), which maps directly onto this screen's axes:
   // sin(heading) is screen +x (east, right), -cos(heading) is screen -y
   // (north, up).
-  const px = ox+player.x*scale, py = oz-player.z*scale;
-  const hs = Math.sin(player.heading), hc = -Math.cos(player.heading);
-  mctx.strokeStyle = '#ffffff';
-  mctx.lineWidth = 1.5;
-  mctx.beginPath();
-  mctx.moveTo(px, py);
-  mctx.lineTo(px+hs*9, py+hc*9);
-  mctx.stroke();
-  mctx.fillStyle = '#ffffff';
+  mctx.fillStyle = 'rgba(255,255,255,0.85)';
   mctx.font = 'bold 9px monospace';
   mctx.textAlign = 'center';
   mctx.textBaseline = 'top';
   mctx.fillText('N', 70, 2);
+  mctx.textBaseline = 'bottom';
+  mctx.fillText('S', 70, 138);
+  mctx.textBaseline = 'middle';
+  mctx.textAlign = 'left';
+  mctx.fillText('E', 130, 70);
+  mctx.textAlign = 'right';
+  mctx.fillText('W', 10, 70);
+
+  const px = ox+player.x*scale, py = oz-player.z*scale;
+  const hs = Math.sin(player.heading), hc = -Math.cos(player.heading);
+  const tipX = px+hs*10, tipY = py+hc*10;
+  const backX = px-hs*4, backY = py-hc*4;
+  const perpX = -hc, perpY = hs;
+  mctx.fillStyle = '#ffffff';
+  mctx.strokeStyle = '#ffffff';
+  mctx.lineWidth = 1.5;
+  mctx.beginPath();
+  mctx.moveTo(px, py);
+  mctx.lineTo(backX, backY);
+  mctx.stroke();
+  mctx.beginPath();
+  mctx.moveTo(tipX, tipY);
+  mctx.lineTo(px+perpX*3, py+perpY*3);
+  mctx.lineTo(px-perpX*3, py-perpY*3);
+  mctx.closePath();
+  mctx.fill();
 }
 
 // a classic automotive dial: 270-degree sweep from lower-left (empty)
