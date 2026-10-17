@@ -550,18 +550,18 @@ function generateCity(seed){
   roadMarks = [];
   const dashLen = 20, dashGap = 22, dashHalfWid = 1.4;
   const TURN_LANE_COLOR = 'rgba(214,190,100,0.85)';
-  // arterials get the full lane layout painted on: a dashed boundary each
-  // side of the center turn lane (picked out in a pale yellow so it reads
-  // as different from an ordinary lane line) plus a dashed divider between
-  // each of the 3 through lanes on each side — 6 lines total instead of
-  // the single centerline a minor street gets
-  const arterialOffsets = [];
-  for(let lane=1; lane<=ARTERIAL_LANES_PER_SIDE; lane++){
+  // arterials get the lane layout painted on: a single dashed yellow line
+  // dead center (the center turn lane itself is still real and drivable —
+  // see laneCountAt/ARTERIAL_TURN_LANE_HALF — only the marking is a single
+  // line now, not a yellow line on each side of it, which read as two
+  // separate direction dividers instead of one) plus a dashed white
+  // divider between each of the 3 through lanes on each side
+  const arterialOffsets = [{off:0, color:TURN_LANE_COLOR}];
+  for(let lane=2; lane<=ARTERIAL_LANES_PER_SIDE; lane++){
     const edge = ARTERIAL_TURN_LANE_HALF + (lane-1)*ARTERIAL_LANE_W;
     if(edge === 0) continue;
-    const color = lane===1 ? TURN_LANE_COLOR : undefined;
-    arterialOffsets.push({off:edge, color});
-    arterialOffsets.push({off:-edge, color});
+    arterialOffsets.push({off:edge});
+    arterialOffsets.push({off:-edge});
   }
   // dashed per block segment, stopping at each cross street's own
   // road-half rather than one continuous dash train running the full
