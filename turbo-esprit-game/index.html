@@ -3568,10 +3568,10 @@ function buildSportsQuads(car){
 
   const rgb = carColorRGB(car.color);
   const body = carShade(rgb, 1.0);
-  const bodyDark = carShade(rgb, 0.8);
-  const bodyLight = carShade(rgb, 1.18);
-  const rocker = carShade(rgb, 0.4);
-  const glass = car.darkWindows ? 'rgb(12,13,16)' : 'rgb(38,44,52)';
+  const bodyDark = carShade(rgb, 0.72);
+  const bodyLight = carShade(rgb, 1.28);
+  const rocker = carShade(rgb, 0.38);
+  const glass = car.darkWindows ? 'rgb(12,13,16)' : 'rgb(44,54,66)';
   const tire = 'rgb(16,16,18)';
   const headlight = 'rgb(255,248,222)';
   const taillight = car.braking ? 'rgb(255,50,40)' : 'rgb(206,64,54)';
@@ -3592,9 +3592,22 @@ function buildSportsQuads(car){
   const NOSE_TOP = 2.6, TAIL_RAKE = 5, TAIL_TOP = 6.6;
   const CAB_N = 1, CAB_T = -7, SILL = 4.6; // SILL: cowl/parcel/cabin-floor all meet here
   const RT = 9.2; // cabin roof — total car height, giving length:height ~3.4
+  // HW only actually held over the cabin/cowl section before — every
+  // chase-cam shot of the previous build showed a flat, constant-width
+  // plank nose-to-tail with none of a wedge sports car's taper, which
+  // read as a generic box no matter what sat on top of it. wAt() tapers
+  // the half-width down toward a near-pointed nose and a narrower tail —
+  // the actual plan-view shape a Lotus Esprit has — and every trim piece
+  // below samples it so nothing pokes out past the tapered body edge.
+  const NOSE_W = 3.2, TAIL_W = 5.3;
+  function wAt(z){
+    if(z >= CAB_N) return lerp(HW, NOSE_W, clamp((z-CAB_N)/(NOSE-CAB_N),0,1));
+    if(z <= CAB_T) return lerp(HW, TAIL_W, clamp((CAB_T-z)/(CAB_T-TAIL),0,1));
+    return HW;
+  }
   const quads = [];
 
-  const b0 = tw(-HW,CB,TAIL), b1 = tw(HW,CB,TAIL), b2 = tw(HW,CB,NOSE), b3 = tw(-HW,CB,NOSE);
+  const b0 = tw(-TAIL_W,CB,TAIL), b1 = tw(TAIL_W,CB,TAIL), b2 = tw(NOSE_W,CB,NOSE), b3 = tw(-NOSE_W,CB,NOSE);
   const bm2 = tw(HW,CB,CAB_N), bm3 = tw(-HW,CB,CAB_N);
   const bm2t = tw(HW,CB,CAB_T), bm3t = tw(-HW,CB,CAB_T);
   const TAIL_EDGE = TAIL+TAIL_RAKE;
@@ -3604,25 +3617,26 @@ function buildSportsQuads(car){
   // surface the higher up it sits, so taillights/signals use this to find
   // the panel's actual z at their height instead of guessing a constant
   const tailZ = (h) => TAIL + (h-CB)/(TAIL_TOP-CB)*(TAIL_EDGE-TAIL);
-  const tt0 = tw(-HW,TAIL_TOP,TAIL_EDGE), tt1 = tw(HW,TAIL_TOP,TAIL_EDGE);
-  const nt0 = tw(-HW,NOSE_TOP,NOSE), nt1 = tw(HW,NOSE_TOP,NOSE);
+  const tt0 = tw(-TAIL_W,TAIL_TOP,TAIL_EDGE), tt1 = tw(TAIL_W,TAIL_TOP,TAIL_EDGE);
+  const nt0 = tw(-NOSE_W,NOSE_TOP,NOSE), nt1 = tw(NOSE_W,NOSE_TOP,NOSE);
   const cw0 = tw(-HW,SILL,CAB_N), cw1 = tw(HW,SILL,CAB_N);
   const pc0 = tw(-HW,SILL,CAB_T), pc1 = tw(HW,SILL,CAB_T);
 
-  quads.push({pts:[b0,tt0,tt1,b1], color:bodyDark});       // tail, raked back
-  quads.push({pts:[b2,nt1,nt0,b3], color:body});           // nose (wedge tip)
-  quads.push({pts:[nt0,nt1,cw1,cw0], color:bodyLight});    // bonnet, rising to the cowl
-  quads.push({pts:[pc0,pc1,tt1,tt0], color:bodyLight});    // rear deck, rising to the tail
-  quads.push({pts:[b2,nt1,cw1,bm2], color:bodyLight});     // right bonnet flank
+  quads.push({pts:[b0,tt0,tt1,b1], color:bodyDark});       // tail, raked back (tapered narrower than the cabin)
+  quads.push({pts:[b2,nt1,nt0,b3], color:body});           // nose (wedge tip, tapered to a near-point)
+  quads.push({pts:[nt0,nt1,cw1,cw0], color:bodyLight});    // bonnet, widening out to the cowl
+  quads.push({pts:[pc0,pc1,tt1,tt0], color:bodyLight});    // rear deck, narrowing in toward the tail
+  quads.push({pts:[b2,nt1,cw1,bm2], color:bodyLight});     // right bonnet flank — the flared-fender taper
   quads.push({pts:[b3,bm3,cw0,nt0], color:bodyDark});      // left bonnet flank
   quads.push({pts:[bm2t,b1,tt1,pc1], color:bodyLight});    // right rear-deck flank
   quads.push({pts:[b0,bm3t,pc0,tt0], color:bodyDark});     // left rear-deck flank
 
   // rocker panel: a dark lower band so the flank reads as two surfaces,
-  // not one flat slab
+  // not one flat slab — samples wAt() so it tucks in with the tapered
+  // nose/tail instead of overhanging past the body's narrower edge there
   const RK = CB + 1.6;
-  quads.push({pts:[tw(HW,0,TAIL),tw(HW,RK,TAIL+2),tw(HW,RK,NOSE-2),tw(HW,0,NOSE)], color:rocker});
-  quads.push({pts:[tw(-HW,0,NOSE),tw(-HW,RK,NOSE-2),tw(-HW,RK,TAIL+2),tw(-HW,0,TAIL)], color:rocker});
+  quads.push({pts:[tw(wAt(TAIL),0,TAIL),tw(wAt(TAIL+2),RK,TAIL+2),tw(wAt(NOSE-2),RK,NOSE-2),tw(wAt(NOSE),0,NOSE)], color:rocker});
+  quads.push({pts:[tw(-wAt(NOSE),0,NOSE),tw(-wAt(NOSE-2),RK,NOSE-2),tw(-wAt(TAIL+2),RK,TAIL+2),tw(-wAt(TAIL),0,TAIL)], color:rocker});
 
   // side intake scoop, just ahead of the rear wheel — the Esprit's
   // signature mid-engine air intake, at the new lower waistline
@@ -3631,39 +3645,64 @@ function buildSportsQuads(car){
 
   // low cabin set toward the rear, floor flush with the bonnet/rear-deck
   // sill on both sides so the glass box reads as sitting ON the body
-  // rather than floating as a separate slab above or sinking into it
-  const CW = 4.4;
+  // rather than floating as a separate slab above or sinking into it.
+  // All four faces are glass now, not just front/back — with only two
+  // of four painted body colour before, the chase cam's usual 3/4-angle
+  // view showed mostly solid flank, reading as a painted box rather than
+  // a glasshouse. The roof also tapers in more at the back than the
+  // front (fastback-style) instead of a flat rectangle, so the cabin's
+  // own silhouette reads as a sloped shape rather than a dropped-on box.
+  const CW = 4.6;
   const gB = [tw(-CW,SILL,CAB_T), tw(CW,SILL,CAB_T), tw(CW,SILL,CAB_N), tw(-CW,SILL,CAB_N)];
-  const gT = [tw(-CW*0.68,RT,CAB_T+1.5), tw(CW*0.68,RT,CAB_T+1.5), tw(CW*0.68,RT,CAB_N-2.5), tw(-CW*0.68,RT,CAB_N-2.5)];
+  const gT = [tw(-CW*0.5,RT,CAB_T+1.5), tw(CW*0.5,RT,CAB_T+1.5), tw(CW*0.72,RT,CAB_N-2.5), tw(-CW*0.72,RT,CAB_N-2.5)];
   quads.push({pts:[gB[0],gT[0],gT[1],gB[1]], color:glass});
-  quads.push({pts:[gB[1],gT[1],gT[2],gB[2]], color:bodyLight});
+  quads.push({pts:[gB[1],gT[1],gT[2],gB[2]], color:glass});
   quads.push({pts:[gB[2],gT[2],gT[3],gB[3]], color:glass});
-  quads.push({pts:[gB[3],gT[3],gT[0],gB[0]], color:bodyLight});
+  quads.push({pts:[gB[3],gT[3],gT[0],gB[0]], color:glass});
   quads.push({pts:[gT[0],gT[1],gT[2],gT[3]], color:bodyLight});
   quads.push(...buildDriverQuads(tw, SILL, -3.5));
 
-  // rear spoiler: two struts and a wing, mounted just behind the tail —
-  // the strut's front mount has to sit at the raked tail-top corner
-  // (TAIL+TAIL_RAKE), not the raw TAIL depth, or it floats disconnected
-  // behind the now-sloped tail panel instead of meeting it
-  const spZ = TAIL_EDGE-2.8, spH0 = TAIL_TOP, spH1 = TAIL_TOP+3.2;
+  // rear spoiler: two struts and a wing, mounted well above and behind
+  // the tail. The old mount (wing barely above roof height, right behind
+  // the cabin) visually merged with the glass box from the high rear
+  // chase camera, reading as two stray blocks beside the cabin instead
+  // of a wing above it — raising it clearly past the roofline and
+  // pushing it further back keeps the two silhouettes separated.
+  const spZ = TAIL_EDGE-3.6, spH0 = TAIL_TOP, spH1 = RT+2.4;
   quads.push({pts:[tw(-3.2,spH0,TAIL_EDGE+0.5),tw(-3.2,spH1,TAIL_EDGE+0.5),tw(-3.2,spH1,spZ),tw(-3.2,spH0,spZ)], color:bodyDark});
   quads.push({pts:[tw(3.2,spH0,spZ),tw(3.2,spH1,spZ),tw(3.2,spH1,TAIL_EDGE+0.5),tw(3.2,spH0,TAIL_EDGE+0.5)], color:bodyDark});
-  quads.push({pts:[tw(-5.5,spH1,TAIL_EDGE+1),tw(5.5,spH1,TAIL_EDGE+1),tw(5.5,spH1,spZ-1),tw(-5.5,spH1,spZ-1)], color:bodyLight});
-  quads.push({pts:[tw(-5.5,spH1-0.7,spZ-1),tw(5.5,spH1-0.7,spZ-1),tw(5.5,spH1-0.7,TAIL_EDGE+1),tw(-5.5,spH1-0.7,TAIL_EDGE+1)], color:bodyDark});
+  quads.push({pts:[tw(-6.2,spH1,TAIL_EDGE+1),tw(6.2,spH1,TAIL_EDGE+1),tw(6.2,spH1,spZ-1),tw(-6.2,spH1,spZ-1)], color:bodyLight});
+  quads.push({pts:[tw(-6.2,spH1-0.7,spZ-1),tw(6.2,spH1-0.7,spZ-1),tw(6.2,spH1-0.7,TAIL_EDGE+1),tw(-6.2,spH1-0.7,TAIL_EDGE+1)], color:bodyDark});
+
+  // a light bar right at the deck's trailing edge, split by a center gap.
+  // The real in-game chase camera sits high (CAM_HEIGHT) and pitched
+  // down, so it looks almost straight down onto the rear-deck's top
+  // surface and barely sees the raked tail panel below it at all —
+  // taillights mounted only down on that panel were nearly invisible in
+  // normal play. This strip sits exactly on the edge where the two
+  // surfaces meet, so it reads from the steep chase angle and the more
+  // level 3/4 angle alike.
+  const lbH0 = TAIL_TOP, lbH1 = TAIL_TOP+0.9, lbGap = 2.0;
+  quads.push({pts:[tw(-TAIL_W+0.7,lbH0,TAIL_EDGE),tw(-lbGap,lbH0,TAIL_EDGE),tw(-lbGap,lbH1,TAIL_EDGE),tw(-TAIL_W+0.7,lbH1,TAIL_EDGE)], color:taillight});
+  quads.push({pts:[tw(lbGap,lbH0,TAIL_EDGE),tw(TAIL_W-0.7,lbH0,TAIL_EDGE),tw(TAIL_W-0.7,lbH1,TAIL_EDGE),tw(lbGap,lbH1,TAIL_EDGE)], color:taillight});
 
   // tail lights + tire hints — pinned to the raked panel's actual surface
-  // (tailZ) at each corner's own height, not a single constant z
+  // (tailZ) at each corner's own height, not a single constant z; the x
+  // span now follows wAt() at that z too so they sit inside the tapered
+  // tail instead of the old fixed HW overhanging past its narrower edge
   const tlZ0 = tailZ(2.6), tlZ1 = tailZ(4.2);
-  quads.push({pts:[tw(-HW+1.1,2.6,tlZ0),tw(-3.5,2.6,tlZ0),tw(-3.5,4.2,tlZ1),tw(-HW+1.1,4.2,tlZ1)], color:taillight});
-  quads.push({pts:[tw(3.5,2.6,tlZ0),tw(HW-1.1,2.6,tlZ0),tw(HW-1.1,4.2,tlZ1),tw(3.5,4.2,tlZ1)], color:taillight});
-  quads.push({pts:[tw(-HW,0,TAIL),tw(-HW+3,0,TAIL),tw(-HW+3,CB,TAIL),tw(-HW,CB,TAIL)], color:tire});
-  quads.push({pts:[tw(HW-3,0,TAIL),tw(HW,0,TAIL),tw(HW,CB,TAIL),tw(HW-3,CB,TAIL)], color:tire});
+  const tlW0 = wAt(tlZ0), tlW1 = wAt(tlZ1);
+  quads.push({pts:[tw(-tlW0+1.0,2.6,tlZ0),tw(-3.0,2.6,tlZ0),tw(-3.0,4.2,tlZ1),tw(-tlW1+1.0,4.2,tlZ1)], color:taillight});
+  quads.push({pts:[tw(3.0,2.6,tlZ0),tw(tlW0-1.0,2.6,tlZ0),tw(tlW1-1.0,4.2,tlZ1),tw(3.0,4.2,tlZ1)], color:taillight});
+  quads.push({pts:[tw(-wAt(TAIL),0,TAIL),tw(-wAt(TAIL)+3,0,TAIL),tw(-wAt(TAIL)+3,CB,TAIL),tw(-wAt(TAIL),CB,TAIL)], color:tire});
+  quads.push({pts:[tw(wAt(TAIL)-3,0,TAIL),tw(wAt(TAIL),0,TAIL),tw(wAt(TAIL),CB,TAIL),tw(wAt(TAIL)-3,CB,TAIL)], color:tire});
 
-  // pop-up headlight pods — small raised boxes instead of a flat decal
-  const podW = 1.8, podFront = NOSE-0.3, podBack = NOSE-3.5, podBase = NOSE_TOP, podTop = NOSE_TOP+3;
+  // pop-up headlight pods — small raised boxes instead of a flat decal,
+  // kept safely inside the tapered nose edge at their own z
+  const podW = 1.5, podFront = NOSE-0.3, podBack = NOSE-3.5, podBase = NOSE_TOP, podTop = NOSE_TOP+3;
+  const podRef = wAt(podFront);
   for(const side of [-1,1]){
-    const cx = side*(HW*0.68);
+    const cx = side*(podRef*0.55);
     const x0 = cx-podW, x1 = cx+podW;
     const xOuter = side>0 ? x1 : x0;
     quads.push({pts:[tw(x0,podBase,podFront),tw(x1,podBase,podFront),tw(x1,podTop,podFront),tw(x0,podTop,podFront)], color:headlight});
@@ -3673,15 +3712,16 @@ function buildSportsQuads(car){
   }
 
   // nose: tire hints
-  quads.push({pts:[tw(-HW,0,NOSE-2),tw(-HW+3,0,NOSE-2),tw(-HW+3,CB,NOSE-2),tw(-HW,CB,NOSE-2)], color:tire});
-  quads.push({pts:[tw(HW-3,0,NOSE-2),tw(HW,0,NOSE-2),tw(HW,CB,NOSE-2),tw(HW-3,CB,NOSE-2)], color:tire});
+  quads.push({pts:[tw(-wAt(NOSE-2),0,NOSE-2),tw(-wAt(NOSE-2)+3,0,NOSE-2),tw(-wAt(NOSE-2)+3,CB,NOSE-2),tw(-wAt(NOSE-2),CB,NOSE-2)], color:tire});
+  quads.push({pts:[tw(wAt(NOSE-2)-3,0,NOSE-2),tw(wAt(NOSE-2),0,NOSE-2),tw(wAt(NOSE-2),CB,NOSE-2),tw(wAt(NOSE-2)-3,CB,NOSE-2)], color:tire});
 
   if(blinkOn && car.signal){
-    const bx = (car.signal==='left' ? -1 : 1) * (HW - 1);
     const amber = 'rgb(255,170,20)';
-    quads.push({pts:[tw(bx-1.3,2.8,NOSE-2.2),tw(bx+1.3,2.8,NOSE-2.2),tw(bx+1.3,4.0,NOSE-2.2),tw(bx-1.3,4.0,NOSE-2.2)], color:amber});
+    const bxF = (car.signal==='left' ? -1 : 1) * (wAt(NOSE-2.2) - 1.6);
+    quads.push({pts:[tw(bxF-1.3,2.8,NOSE-2.2),tw(bxF+1.3,2.8,NOSE-2.2),tw(bxF+1.3,4.0,NOSE-2.2),tw(bxF-1.3,4.0,NOSE-2.2)], color:amber});
     const sgZ = tailZ(3.4);
-    quads.push({pts:[tw(bx-1.3,2.8,sgZ),tw(bx+1.3,2.8,sgZ),tw(bx+1.3,4.0,sgZ),tw(bx-1.3,4.0,sgZ)], color:amber});
+    const bxR = (car.signal==='left' ? -1 : 1) * (wAt(sgZ) - 1.6);
+    quads.push({pts:[tw(bxR-1.3,2.8,sgZ),tw(bxR+1.3,2.8,sgZ),tw(bxR+1.3,4.0,sgZ),tw(bxR-1.3,4.0,sgZ)], color:amber});
   }
 
   return quads;
