@@ -2721,7 +2721,29 @@ function polyFill(pts, color, stroke, width){
   ctx.moveTo(pts[0].x, pts[0].y);
   for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x, pts[i].y);
   ctx.closePath();
-  ctx.fillStyle = color;
+  if(color && color.glow){
+    // a soft point-light glow (headlights, brake lights, street lamps) —
+    // flat-shaded quads otherwise have no per-pixel falloff at all, so
+    // this builds a real radial gradient centered on the quad's own
+    // projected screen position/size instead of filling it with a flat
+    // color. The quad itself (see buildGlowQuads) is deliberately
+    // oversized relative to the visual radius so the gradient fades to
+    // fully transparent well before reaching its corners — otherwise
+    // the quad's straight edges would show through as a hard cutoff.
+    let cx=0, cy=0;
+    for(const p of pts){ cx+=p.x; cy+=p.y; }
+    cx/=pts.length; cy/=pts.length;
+    let maxR = 1;
+    for(const p of pts){ maxR = Math.max(maxR, Math.hypot(p.x-cx, p.y-cy)); }
+    const screenR = maxR / 1.6;
+    const g = ctx.createRadialGradient(cx,cy,0,cx,cy,screenR);
+    const [r,gg,b] = color.rgb;
+    g.addColorStop(0, `rgba(${r},${gg},${b},${color.alpha.toFixed(3)})`);
+    g.addColorStop(1, `rgba(${r},${gg},${b},0)`);
+    ctx.fillStyle = g;
+  } else {
+    ctx.fillStyle = color;
+  }
   ctx.fill();
   if(stroke){ ctx.strokeStyle = stroke; ctx.lineWidth = width || 1; ctx.stroke(); }
 }
@@ -3182,6 +3204,69 @@ function buildHeadlightBeam(car){
   const nearW = 3, farW = 9, len = 42;
   return [{ pts:[tw(-nearW,nose),tw(nearW,nose),tw(farW,nose+len),tw(-farW,nose+len)], color:`rgba(255,244,200,${alpha.toFixed(3)})`, depthBias: GROUND_DECAL_BIAS }];
 }
+
+// a soft point-light glow: two crossed vertical quads (one facing along
+// x, one along z — the same two-plane trick the lamp/beacon diamonds
+// already use, so it reads from any horizontal viewing angle), each
+// filled at draw time with a real radial gradient instead of a flat
+// color (see the `color.glow` handling in polyFill) — a flat-shaded quad
+// has no per-pixel falloff on its own, which is what made every earlier
+// pass at this still read as a hard-edged diamond rather than a glow.
+// Each quad is oversized relative to the visual radius `r` so the
+// gradient fades to fully transparent before reaching its own corners.
+function buildGlowQuads(wx, wy, wz, r, rgb, alpha){
+  const s = r*1.6;
+  const glow = {glow:true, rgb, alpha};
+  return [
+    {pts:[[wx-s,wy-s*0.6,wz],[wx-s,wy+s*0.6,wz],[wx+s,wy+s*0.6,wz],[wx+s,wy-s*0.6,wz]], color:glow},
+    {pts:[[wx,wy-s*0.6,wz-s],[wx,wy+s*0.6,wz-s],[wx,wy+s*0.6,wz+s],[wx,wy-s*0.6,wz+s]], color:glow},
+  ];
+}
+
+// the headlight cubes on the body were always a flat lit colour with no
+// actual halo — a real headlight bleeds light outward around the lamp
+// itself, not just down the beam onto the road ahead (buildHeadlightBeam).
+// Two stacked layers (a wide faint halo behind a tight bright core) is a
+// cheap stand-in for the falloff a texture/shader would normally give.
+function buildHeadlightGlow(car){
+  if(dayAmbient > 0.5) return [];
+  const alpha = clamp((0.5-dayAmbient)/0.35, 0, 1);
+  if(alpha < 0.03) return [];
+  const d = VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car;
+  const hw = d[0], nose = d[1];
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, lz){ return [car.x + (lx*c + lz*s), 3.2, car.z + (-lx*s + lz*c)]; }
+  const quads = [];
+  for(const side of [-1,1]){
+    const p = tw(side*hw*0.62, nose-0.4);
+    quads.push(...buildGlowQuads(p[0],p[1],p[2], 3.4, [255,238,190], alpha*0.22));
+    quads.push(...buildGlowQuads(p[0],p[1],p[2], 1.5, [255,250,225], alpha*0.55));
+  }
+  return quads;
+}
+
+// brake lights: a faint ambient glow once it's dark (running lights),
+// brighter and wider the instant the car is actually braking — visible
+// any time of day, not just at night, since that's a safety signal a
+// real driver relies on regardless of ambient light.
+function buildBrakeGlow(car){
+  const braking = !!car.braking;
+  const nightAlpha = dayAmbient <= 0.5 ? clamp((0.5-dayAmbient)/0.35, 0, 1)*0.18 : 0;
+  const alpha = braking ? Math.max(nightAlpha, 0.5) : nightAlpha;
+  if(alpha < 0.03) return [];
+  const d = VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car;
+  const hw = d[0], tail = d[2];
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, lz){ return [car.x + (lx*c + lz*s), 3.0, car.z + (-lx*s + lz*c)]; }
+  const r = braking ? 2.6 : 1.3;
+  const quads = [];
+  for(const side of [-1,1]){
+    const p = tw(side*hw*0.58, tail+0.3);
+    quads.push(...buildGlowQuads(p[0],p[1],p[2], r, [255,50,40], alpha));
+  }
+  return quads;
+}
+
 function buildVehicleQuads(car){
   let body;
   if(car.type === 'motorbike') body = buildMotorbikeQuads(car);
@@ -3194,7 +3279,7 @@ function buildVehicleQuads(car){
   else if(car.type === 'van') body = buildVanQuads(car);
   else if(car.type === 'sports') body = buildSportsQuads(car);
   else body = buildCarQuads(car);
-  return [...buildVehicleShadow(car), ...buildHeadlightBeam(car), ...body];
+  return [...buildVehicleShadow(car), ...buildHeadlightBeam(car), ...buildHeadlightGlow(car), ...buildBrakeGlow(car), ...body];
 }
 
 // A small low-poly car: a chassis slab, a cabin/greenhouse with tinted
@@ -4081,10 +4166,16 @@ function buildStreetLampQuads(lp){
   quads.push({pts:[[hx,hy,hz-hr],[hx,hy+hr*0.7,hz],[hx,hy,hz+hr],[hx,hy-hr*0.7,hz]], color:lampColor});
 
   if(night){
-    const alpha = clamp((0.55-dayAmbient)/0.35, 0, 1) * 0.22;
-    if(alpha > 0.01){
+    const alpha = clamp((0.55-dayAmbient)/0.35, 0, 1);
+    // a wide faint halo behind a tighter bright core around the bulb
+    // itself, same two-layer stand-in buildHeadlightGlow uses, so the
+    // lamp actually reads as a light source instead of a flat lit box
+    quads.push(...buildGlowQuads(hx, hy, hz, 4.2, [255,210,130], alpha*0.2));
+    quads.push(...buildGlowQuads(hx, hy, hz, 2.0, [255,230,170], alpha*0.5));
+    const poolAlpha = alpha * 0.22;
+    if(poolAlpha > 0.01){
       const r = 12;
-      quads.push({pts:[[hx-r,0.09,hz],[hx,0.09,hz-r],[hx+r,0.09,hz],[hx,0.09,hz+r]], color:`rgba(255,210,120,${alpha.toFixed(3)})`, depthBias: GROUND_DECAL_BIAS});
+      quads.push({pts:[[hx-r,0.09,hz],[hx,0.09,hz-r],[hx+r,0.09,hz],[hx,0.09,hz+r]], color:`rgba(255,210,120,${poolAlpha.toFixed(3)})`, depthBias: GROUND_DECAL_BIAS});
     }
   }
   return quads;
@@ -4793,7 +4884,7 @@ function drawScene(){
     // real, measurable frame cost for cars nobody could see anyway.
     if(car!==player && dist2(cam.x,cam.z,car.x,car.z) > RENDER_DIST*RENDER_DIST) continue;
     for(const f of buildVehicleQuads(car)){
-      allFaces.push({pts:f.pts, color:f.color, stroke:carStroke, width:1, depth:faceDepth(f.pts, cam) + (f.depthBias||0)});
+      allFaces.push({pts:f.pts, color:f.color, stroke:(f.color&&f.color.glow)?null:carStroke, width:1, depth:faceDepth(f.pts, cam) + (f.depthBias||0)});
     }
   }
   for(const bu of bullets){
