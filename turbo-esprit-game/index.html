@@ -557,12 +557,27 @@ function generateCity(seed){
     arterialOffsets.push({off:edge, color});
     arterialOffsets.push({off:-edge, color});
   }
+  // dashed per block segment, stopping at each cross street's own
+  // road-half rather than one continuous dash train running the full
+  // length of the world — the old version painted every street's marks
+  // straight through every intersection it crossed, so a street's own
+  // lane lines and the cross street's visibly overlapped/crossed each
+  // other right in the middle of every junction. Stopping each segment
+  // at the cross street's edge (same margin technique medians/sidewalks
+  // already use) both removes the crossing and leaves a natural gap
+  // through the junction box itself.
   for(let i=0;i<streetLinesX.length;i++){
     const x = streetLinesX[i];
     const offsets = isArterialX[i] ? arterialOffsets : [{off:0}];
     for(const {off, color} of offsets){
-      for(let z=-worldHalfZ+dashGap; z<worldHalfZ; z+=dashLen+dashGap){
-        roadMarks.push({x1:x+off-dashHalfWid, x2:x+off+dashHalfWid, z1:z, z2:z+dashLen, color});
+      for(let j=0;j<BLOCKS_Z;j++){
+        const segStart = streetLinesZ[j]+roadHalfZ[j], segEnd = streetLinesZ[j+1]-roadHalfZ[j+1];
+        if(segEnd<=segStart) continue;
+        for(let z=segStart+dashGap; z<segEnd; z+=dashLen+dashGap){
+          const zEnd = Math.min(z+dashLen, segEnd);
+          if(zEnd<=z) continue;
+          roadMarks.push({x1:x+off-dashHalfWid, x2:x+off+dashHalfWid, z1:z, z2:zEnd, color});
+        }
       }
     }
   }
@@ -570,8 +585,14 @@ function generateCity(seed){
     const z = streetLinesZ[i];
     const offsets = isArterialZ[i] ? arterialOffsets : [{off:0}];
     for(const {off, color} of offsets){
-      for(let x=-worldHalfX+dashGap; x<worldHalfX; x+=dashLen+dashGap){
-        roadMarks.push({x1:x, x2:x+dashLen, z1:z+off-dashHalfWid, z2:z+off+dashHalfWid, color});
+      for(let j=0;j<BLOCKS_X;j++){
+        const segStart = streetLinesX[j]+roadHalfX[j], segEnd = streetLinesX[j+1]-roadHalfX[j+1];
+        if(segEnd<=segStart) continue;
+        for(let x=segStart+dashGap; x<segEnd; x+=dashLen+dashGap){
+          const xEnd = Math.min(x+dashLen, segEnd);
+          if(xEnd<=x) continue;
+          roadMarks.push({x1:x, x2:xEnd, z1:z+off-dashHalfWid, z2:z+off+dashHalfWid, color});
+        }
       }
     }
   }
