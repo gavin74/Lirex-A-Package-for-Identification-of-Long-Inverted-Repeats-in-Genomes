@@ -911,7 +911,13 @@ function generateCity(seed){
   // sat close enough to building corners to visibly clip into them
   billboards = [];
   const bbRnd = mulberry32(seed + 2024);
-  const bbOffset = WALL_THICK + 10;
+  // the perimeter one-way street's centerline sits right at the wall's
+  // own inner face (worldHalfX/Z), reaching ROAD_HALF_MINOR out into the
+  // city on top of that — a billboard only WALL_THICK+10 out from the
+  // wall landed well inside that carriageway, in the middle of the
+  // street traffic actually drives on, instead of clear of it against
+  // the wall the way every other roadside prop is kept clear of the road
+  const bbOffset = ROAD_HALF_MINOR + 14;
   const wallSides = [
     {fixedAxis:'x', fixedVal: -worldHalfX+bbOffset, rangeMax: worldHalfZ, facing: Math.PI/2},
     {fixedAxis:'x', fixedVal: worldHalfX-bbOffset, rangeMax: worldHalfZ, facing: -Math.PI/2},
@@ -1161,7 +1167,7 @@ function snapToLane(car, lineX, lineZ){
   const lineVal = car.axis==='z' ? lineX : lineZ;
   const laneCount = laneCountAt(car.axis, lineVal);
   const mag = laneCount<=1 ? 1 : 1+Math.floor(Math.random()*laneCount);
-  car.lane = correctLane(car.axis, car.dir) * mag;
+  car.lane = correctLane(car.axis, car.dir, lineVal) * mag;
   const off = car.lane * LANE_OFFSET;
   if(car.axis==='z'){ car.x = lineX + off; car.laneHome = car.x; }
   else { car.z = lineZ + off; car.laneHome = car.z; }
@@ -1829,6 +1835,10 @@ function changeLane(side){
   const rightSign = player.dir * (player.axis==='z' ? 1 : -1);
   const laneCount = laneCountAt(player.axis, player.streetCoord);
   if(laneCount <= 1){
+    // a one-way perimeter street only has the one legal (city-ward)
+    // position at all — the "other side" is the wall, not an oncoming
+    // lane, so there's nothing to change into
+    if(oneWayDir(player.axis, player.streetCoord) !== null) return;
     player.lane = side==='left' ? -rightSign : rightSign;
   } else {
     // an arterial has real lanes to step through rather than just the one
@@ -1892,7 +1902,18 @@ function queueTurn(side){
 // from right-hand traffic (US-style) to left-hand (UK-style); AI traffic
 // doesn't use lanes for its own position (see spawnStreetCar), so this
 // only needs to touch the player's own lane logic
-function correctLane(axis, dir){
+function correctLane(axis, dir, line){
+  // the perimeter one-way streets aren't a normal two-sided road split
+  // into a correct/oncoming half — the "other side" from the normal
+  // DRIVE_SIDE convention isn't an oncoming lane there at all, it's the
+  // wall (or beyond it): these streets run right along the world edge
+  // with buildings on only one side, so the correct-hand math below
+  // (built for a road with real pavement on both sides of center) always
+  // picked the wall-side position, sending traffic driving past the
+  // wall into the void. The only sane side on one of these is geometric,
+  // not DRIVE_SIDE-relative: toward the city, i.e. away from whichever
+  // edge of the map `line` sits on.
+  if(line !== undefined && oneWayDir(axis, line) !== null) return -Math.sign(line) || 1;
   const rightHand = dir * (axis==='z' ? 1 : -1);
   return DRIVE_SIDE === 'right' ? rightHand : -rightHand;
 }
@@ -1906,7 +1927,7 @@ function turnPlayer(side){
   player.axis = next.axis;
   player.dir = next.dir;
   player.targetHeading = cardinalHeading(next.axis, next.dir);
-  player.lane = correctLane(next.axis, next.dir);
+  player.lane = correctLane(next.axis, next.dir, player.streetCoord);
 }
 
 // checked every frame while a turn is armed: fires the turn the moment
@@ -4601,6 +4622,12 @@ function drawMoon(cam){
   const wx = cam.x + c*camX + s*rz, wz = cam.z - s*camX + c*rz;
   for(const b of buildings){
     if(segmentHitsBox(cam.x, cam.z, wx, wz, b.x1, b.x2, b.z1, b.z2)) return;
+  }
+  // the perimeter wall is a separate array from buildings (same box
+  // shape, see `walls`) — missing it here is why the moon still drew
+  // over the wall even after buildings started occluding it correctly
+  for(const w of walls){
+    if(segmentHitsBox(cam.x, cam.z, wx, wz, w.x1, w.x2, w.z1, w.z2)) return;
   }
 
   ctx.save();
