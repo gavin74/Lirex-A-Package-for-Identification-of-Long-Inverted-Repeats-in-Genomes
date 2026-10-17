@@ -84,8 +84,12 @@
   .row{display:flex;justify-content:space-between;gap:10px;margin:2px 0}
   .label{color:var(--dim);font-size:11px}
   #minimap{border:1px solid var(--panel-edge);background:rgba(8,9,10,.76);flex:0 0 auto}
-  .dialRow{display:flex;gap:10px;flex:0 0 auto}
+  .dialRow{display:flex;gap:10px;flex:0 0 auto;align-items:center}
   .dialRow canvas{background:radial-gradient(circle,#1c1d20,#101113);border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,.5)}
+  .blinker{width:0;height:0;opacity:.15;transition:opacity .05s linear}
+  .blinker.lit{opacity:1;filter:drop-shadow(0 0 4px var(--accent))}
+  .blinkerL{border-top:9px solid transparent;border-bottom:9px solid transparent;border-right:15px solid var(--accent)}
+  .blinkerR{border-top:9px solid transparent;border-bottom:9px solid transparent;border-left:15px solid var(--accent)}
   .clickable{cursor:pointer;pointer-events:auto;color:var(--good)}
   #hudSide{display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
 
@@ -140,9 +144,11 @@
   <div id="hud">
     <div class="box">
       <div class="dialRow">
+        <div class="blinker blinkerL" id="blinkerL"></div>
         <canvas id="speedDial" width="110" height="110"></canvas>
         <canvas id="revDial" width="110" height="110"></canvas>
         <canvas id="fuelDial" width="110" height="110"></canvas>
+        <div class="blinker blinkerR" id="blinkerR"></div>
       </div>
     </div>
     <canvas id="minimap" width="150" height="150"></canvas>
@@ -5260,6 +5266,10 @@ function updateHUD(){
   }
   document.getElementById('hudScore').textContent = score;
   document.getElementById('hudCaught').textContent = caught;
+  // dashboard turn-signal indicators — same blinkOn clock the car's own
+  // signal lights already blink on, just mirrored onto the HUD
+  document.getElementById('blinkerL').classList.toggle('lit', blinkOn && player.signal==='left');
+  document.getElementById('blinkerR').classList.toggle('lit', blinkOn && player.signal==='right');
   if(FUEL_ENABLED){
     const fuelColor = fuel < 25 ? '#d9503a' : '#5fa8d9';
     drawDialGauge(document.getElementById('fuelDial'), clamp(fuel,0,100)/100, fuelColor, 'FUEL');
