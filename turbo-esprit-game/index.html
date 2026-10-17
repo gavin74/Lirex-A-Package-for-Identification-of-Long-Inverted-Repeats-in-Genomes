@@ -3295,14 +3295,18 @@ function buildSportsQuads(car){
   const intake = 'rgb(26,28,32)';
 
   const HW = 7.0, NOSE = 17, TAIL = -14, CB = 2.5;
-  const NOSE_TOP = 4.2, TAIL_TOP = 10.5;
+  // lower overall, and the tail corner is pulled forward (TAIL_RAKE) so
+  // the back cuts off on a backward slant instead of standing as a flat
+  // vertical wall — a low vertical tail at this height/width ratio read
+  // as a van's back doors rather than a wedge-shaped coupe's Kammback
+  const NOSE_TOP = 3.8, TAIL_TOP = 9.0, TAIL_RAKE = 4;
   const quads = [];
 
   const b0 = tw(-HW,CB,TAIL), b1 = tw(HW,CB,TAIL), b2 = tw(HW,CB,NOSE), b3 = tw(-HW,CB,NOSE);
-  const tt0 = tw(-HW,TAIL_TOP,TAIL), tt1 = tw(HW,TAIL_TOP,TAIL);
+  const tt0 = tw(-HW,TAIL_TOP,TAIL+TAIL_RAKE), tt1 = tw(HW,TAIL_TOP,TAIL+TAIL_RAKE);
   const nt0 = tw(-HW*0.8,NOSE_TOP,NOSE), nt1 = tw(HW*0.8,NOSE_TOP,NOSE);
 
-  quads.push({pts:[b0,tt0,tt1,b1], color:bodyDark});     // tail
+  quads.push({pts:[b0,tt0,tt1,b1], color:bodyDark});     // tail, raked back
   quads.push({pts:[b2,nt1,nt0,b3], color:body});         // nose (wedge tip)
   quads.push({pts:[b1,tt1,nt1,b2], color:bodyLight});    // right flank, sloped
   quads.push({pts:[b3,nt0,tt0,b0], color:bodyDark});     // left flank, sloped
@@ -3319,8 +3323,12 @@ function buildSportsQuads(car){
   quads.push({pts:[tw(HW,6,-7),tw(HW,6,-1),tw(HW,9.5,-1),tw(HW,9.5,-7)], color:intake});
   quads.push({pts:[tw(-HW,6,-1),tw(-HW,6,-7),tw(-HW,9.5,-7),tw(-HW,9.5,-1)], color:intake});
 
-  // low cabin set toward the rear
-  const CW = 4.6, CAB_N = 1, CAB_T = -8, CAB_BASE = 8, RT = 13;
+  // low cabin set toward the rear — base raised to clear the deck surface
+  // under it (the deck slopes from TAIL_TOP down to NOSE_TOP, and at the
+  // old CAB_BASE=8 the cabin's rear footprint sat just below that slope,
+  // so the deck visibly poked through the glass instead of the cabin
+  // reading as sitting cleanly on top of it)
+  const CW = 4.6, CAB_N = 1, CAB_T = -8, CAB_BASE = 9.3, RT = 14.2;
   const gB = [tw(-CW,CAB_BASE,CAB_T), tw(CW,CAB_BASE,CAB_T), tw(CW,CAB_BASE,CAB_N), tw(-CW,CAB_BASE,CAB_N)];
   const gT = [tw(-CW*0.7,RT,CAB_T+2), tw(CW*0.7,RT,CAB_T+2), tw(CW*0.7,RT,CAB_N-3), tw(-CW*0.7,RT,CAB_N-3)];
   quads.push({pts:[gB[0],gT[0],gT[1],gB[1]], color:glass});
@@ -3330,12 +3338,16 @@ function buildSportsQuads(car){
   quads.push({pts:[gT[0],gT[1],gT[2],gT[3]], color:bodyLight});
   quads.push(...buildDriverQuads(tw, CAB_BASE, -3.5));
 
-  // rear spoiler: two struts and a wing, mounted just behind the tail
-  const spZ = TAIL-2.8, spH0 = TAIL_TOP, spH1 = TAIL_TOP+4;
-  quads.push({pts:[tw(-3.2,spH0,TAIL+0.5),tw(-3.2,spH1,TAIL+0.5),tw(-3.2,spH1,spZ),tw(-3.2,spH0,spZ)], color:bodyDark});
-  quads.push({pts:[tw(3.2,spH0,spZ),tw(3.2,spH1,spZ),tw(3.2,spH1,TAIL+0.5),tw(3.2,spH0,TAIL+0.5)], color:bodyDark});
-  quads.push({pts:[tw(-5.5,spH1,TAIL+1),tw(5.5,spH1,TAIL+1),tw(5.5,spH1,spZ-1),tw(-5.5,spH1,spZ-1)], color:bodyLight});
-  quads.push({pts:[tw(-5.5,spH1-0.7,spZ-1),tw(5.5,spH1-0.7,spZ-1),tw(5.5,spH1-0.7,TAIL+1),tw(-5.5,spH1-0.7,TAIL+1)], color:bodyDark});
+  // rear spoiler: two struts and a wing, mounted just behind the tail —
+  // the strut's front mount has to sit at the raked tail-top corner
+  // (TAIL+TAIL_RAKE), not the raw TAIL depth, or it floats disconnected
+  // behind the now-sloped tail panel instead of meeting it
+  const TAIL_EDGE = TAIL+TAIL_RAKE;
+  const spZ = TAIL_EDGE-2.8, spH0 = TAIL_TOP, spH1 = TAIL_TOP+4;
+  quads.push({pts:[tw(-3.2,spH0,TAIL_EDGE+0.5),tw(-3.2,spH1,TAIL_EDGE+0.5),tw(-3.2,spH1,spZ),tw(-3.2,spH0,spZ)], color:bodyDark});
+  quads.push({pts:[tw(3.2,spH0,spZ),tw(3.2,spH1,spZ),tw(3.2,spH1,TAIL_EDGE+0.5),tw(3.2,spH0,TAIL_EDGE+0.5)], color:bodyDark});
+  quads.push({pts:[tw(-5.5,spH1,TAIL_EDGE+1),tw(5.5,spH1,TAIL_EDGE+1),tw(5.5,spH1,spZ-1),tw(-5.5,spH1,spZ-1)], color:bodyLight});
+  quads.push({pts:[tw(-5.5,spH1-0.7,spZ-1),tw(5.5,spH1-0.7,spZ-1),tw(5.5,spH1-0.7,TAIL_EDGE+1),tw(-5.5,spH1-0.7,TAIL_EDGE+1)], color:bodyDark});
 
   // tail lights + tire hints
   quads.push({pts:[tw(-HW+1.1,4,TAIL),tw(-3.5,4,TAIL),tw(-3.5,6,TAIL),tw(-HW+1.1,6,TAIL)], color:taillight});
