@@ -190,8 +190,8 @@
         </p>
         <div class="row" style="display:flex;align-items:center;gap:10px;justify-content:center;margin:10px 0;">
           <label for="trafficSlider" style="font-size:13px;opacity:0.85">TRAFFIC</label>
-          <input type="range" id="trafficSlider" min="0.4" max="3" step="0.2" value="1.6">
-          <span id="trafficSliderVal" style="font-size:13px;opacity:0.85;min-width:2.5em">1.6x</span>
+          <input type="range" id="trafficSlider" min="0.4" max="4" step="0.2" value="2.2">
+          <span id="trafficSliderVal" style="font-size:13px;opacity:0.85;min-width:2.5em">2.2x</span>
         </div>
         <div class="go" id="btnStart">PRESS ENTER OR CLICK TO DRIVE</div>
       </div>
@@ -1261,7 +1261,7 @@ if(!FUEL_ENABLED) document.getElementById('fuelDial').style.display = 'none';
 document.getElementById('btnStart').addEventListener('click', startGame);
 document.getElementById('wrap').addEventListener('click', (e)=>{ if(gameState==='start' && e.target.id!=='trafficSlider') startGame(); });
 
-let trafficDensity = 1.6;
+let trafficDensity = 2.2;
 const trafficSliderEl = document.getElementById('trafficSlider');
 trafficSliderEl.addEventListener('click', e => e.stopPropagation());
 trafficSliderEl.addEventListener('input', () => {
