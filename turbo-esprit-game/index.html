@@ -1093,7 +1093,9 @@ function spawnPlayerStart(){
   // straight at the perimeter wall and its billboards.
   const x = nearestStreet(streetLinesX, 0);
   const z = streetLinesZ[1];
-  const car = makeCar(x, z, 0, '#e8e8e8', 220);
+  // the original's own manual is explicit about this: "THE CARS — RED:
+  // Your car" — the player's Esprit was always red, never white/grey
+  const car = makeCar(x, z, 0, '#c22424', 220);
   car.type = 'sports';
   car.crashCooldown = 0;
   car.hazardCooldown = 0;
