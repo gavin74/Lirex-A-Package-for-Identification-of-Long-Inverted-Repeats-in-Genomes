@@ -470,13 +470,19 @@ function generateCity(seed){
         // except at a registered junction line, so without this the
         // forecourt is physically unreachable even though nothing
         // collides there: a queued turn just sits ignored until the next
-        // real junction. The south curb is used as a fixed "driveway"
-        // entrance: laneAxis/laneLine identify that street, laneCross is
-        // how far sideways (from that street's centerline) the pad sits,
-        // and alongCoord is where along the street the driveway lines up
-        // — see nearbyGasPad()/the player.parkPad steering in updatePlayer.
-        const pad = {x:cx, z:cz, r:46,
-          laneAxis:'x', laneLine: streetLinesZ[j], laneCross: cz-streetLinesZ[j], alongCoord: cx};
+        // real junction. All four curbs bounding the plot are registered
+        // as driveway entrances (not just the south one) so pulling in
+        // works whichever street you approach the station from: each
+        // entrance's axis/line identify that street, cross is how far
+        // sideways (from that street's centerline) the pad sits, and
+        // along is where along the street the driveway lines up — see
+        // nearbyGasPad()/the player.parkPad steering in updatePlayer.
+        const pad = {x:cx, z:cz, r:46, entrances:[
+          {axis:'x', line: streetLinesZ[j],   cross: cz-streetLinesZ[j],   along: cx}, // south
+          {axis:'x', line: streetLinesZ[j+1], cross: cz-streetLinesZ[j+1], along: cx}, // north
+          {axis:'z', line: streetLinesX[i],   cross: cx-streetLinesX[i],   along: cz}, // west
+          {axis:'z', line: streetLinesX[i+1], cross: cx-streetLinesX[i+1], along: cz}, // east
+        ]};
         pad.quads = buildStationQuads(pad);
         gasPads.push(pad);
         continue;
@@ -1872,18 +1878,22 @@ function changeLane(side){
 }
 
 // is there a gas station right alongside the player, on the named side,
-// close enough to pull into? Only matches a pad whose driveway street is
-// the exact street the player is currently on (laneAxis+laneLine), within
-// a short window of where that driveway actually lines up (alongCoord).
+// close enough to pull into? Checks every entrance of every pad (one per
+// bounding street, see generateCity) so it matches regardless of which of
+// the station's four sides the player happens to be driving along — only
+// one whose axis+line is the exact street the player is currently on,
+// within a short window of where that driveway actually lines up (along).
 function nearbyGasPad(side){
   const forward = player.axis==='z' ? player.z : player.x;
   const rightSign = player.dir * (player.axis==='z' ? 1 : -1);
   for(const pad of gasPads){
-    if(pad.laneAxis !== player.axis) continue;
-    if(Math.abs(player.streetCoord - pad.laneLine) > 0.5) continue;
-    if(Math.abs(forward - pad.alongCoord) > 70) continue;
-    const padSide = Math.sign(pad.laneCross) === rightSign ? 'right' : 'left';
-    if(padSide === side) return pad;
+    for(const ent of pad.entrances){
+      if(ent.axis !== player.axis) continue;
+      if(Math.abs(player.streetCoord - ent.line) > 0.5) continue;
+      if(Math.abs(forward - ent.along) > 70) continue;
+      const padSide = Math.sign(ent.cross) === rightSign ? 'right' : 'left';
+      if(padSide === side) return {pad, cross: ent.cross};
+    }
   }
   return null;
 }
@@ -1900,9 +1910,9 @@ function queueTurn(side){
     setSignal(player, side, 2.5);
     return;
   }
-  const pad = nearbyGasPad(side);
-  if(pad){
-    player.parkPad = pad;
+  const hit = nearbyGasPad(side);
+  if(hit){
+    player.parkPad = hit;
     setSignal(player, side, 2.5);
     return;
   }
@@ -2003,7 +2013,7 @@ function updatePlayer(dt){
   // into a gas station (player.parkPad), the same easing steers toward
   // the pad's cross-position instead of a normal lane slot — see
   // nearbyGasPad()/queueTurn().
-  const targetOffset = player.parkPad ? player.parkPad.laneCross : (player.lane * LANE_OFFSET + avoid);
+  const targetOffset = player.parkPad ? player.parkPad.cross : (player.lane * LANE_OFFSET + avoid);
   const prevLaneOffset = player.laneOffset;
   const laneEase = 1 - Math.exp(-LANE_SPEED/LANE_OFFSET*dt);
   player.laneOffset += (targetOffset - player.laneOffset) * laneEase;
