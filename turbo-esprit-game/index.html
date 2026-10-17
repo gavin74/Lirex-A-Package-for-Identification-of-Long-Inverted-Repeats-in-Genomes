@@ -367,6 +367,7 @@ let oneWaySigns = []; // {x,z,axis,dir} — big blue British one-way plates alon
 let billboards = []; // {x,z,facing,slogan} — massive, freestanding, mounted on the perimeter wall
 let medians = []; // {x1,x2,z1,z2} — collidable grass central reservations, a couple of streets made into dual carriageways
 let clocks = []; // {x,z,facing} — street clock towers, hands driven by the actual in-game time of day
+let streetLamps = []; // {x,z,dx,dz} — cobra-head lamps along every street, dx/dz point from the pole toward the road
 let streetLinesX = [];
 let streetLinesZ = [];
 let isArterialX = [], isArterialZ = [];  // one bool per streetLinesX/Z entry
@@ -725,6 +726,32 @@ function generateCity(seed){
     const cross = line + (signRnd()<0.5?-curbOff:curbOff);
     const pos = axis==='z' ? {x:cross, z:along} : {x:along, z:cross};
     signs.push({x:pos.x, z:pos.z, axis, type: SIGN_TYPES[Math.floor(signRnd()*SIGN_TYPES.length)]});
+  }
+
+  // street lamps along every street, alternating curbside each post —
+  // purely a night-driving/atmosphere feature (see buildStreetLampQuads):
+  // off and just a plain grey post by day, lit with a warm pool of light
+  // on the road at night. Same curb offset the signs use so the head
+  // clears the carriageway; spacing is generous (half a block) since
+  // night's own shorter RENDER_DIST means only a handful are ever in view
+  // at once regardless of how many exist across the whole map.
+  streetLamps = [];
+  const LAMP_SPACING = 300, LAMP_MARGIN = 40;
+  for(let i=0;i<streetLinesX.length;i++){
+    const line = streetLinesX[i], curbOff = roadHalfX[i]-4;
+    let idx = 0;
+    for(let z=-worldHalfZ+LAMP_MARGIN; z<worldHalfZ-LAMP_MARGIN; z+=LAMP_SPACING, idx++){
+      const s = idx%2===0 ? 1 : -1;
+      streetLamps.push({x:line+s*curbOff, z, dx:-s, dz:0});
+    }
+  }
+  for(let i=0;i<streetLinesZ.length;i++){
+    const line = streetLinesZ[i], curbOff = roadHalfZ[i]-4;
+    let idx = 0;
+    for(let x=-worldHalfX+LAMP_MARGIN; x<worldHalfX-LAMP_MARGIN; x+=LAMP_SPACING, idx++){
+      const s = idx%2===0 ? 1 : -1;
+      streetLamps.push({x, z:line+s*curbOff, dx:0, dz:-s});
+    }
   }
 
   // a handful of street clock towers, hands driven by the actual in-game
@@ -4001,6 +4028,44 @@ function buildSignQuads(sg){
   return quads;
 }
 
+// a cobra-head street lamp: plain grey post + arm by day, a lit warm head
+// and a soft pool of light on the road below it once it's dark enough —
+// same dayAmbient threshold and ground-decal convention buildHeadlightBeam
+// already uses, so lamps and headlights come on together.
+function buildStreetLampQuads(lp){
+  const quads = [];
+  const poleH = 19, px = lp.x, pz = lp.z;
+  const poleColor = 'rgb(68,70,74)';
+  quads.push({pts:[[px-0.8,0,pz],[px-0.8,poleH,pz],[px+0.8,poleH,pz],[px+0.8,0,pz]], color:poleColor});
+  quads.push({pts:[[px,0,pz-0.8],[px,poleH,pz-0.8],[px,poleH,pz+0.8],[px,0,pz+0.8]], color:poleColor});
+
+  // the arm reaches from the pole top out over the road, in whichever
+  // direction lp.dx/lp.dz point (toward the street, away from the curb)
+  const hx = px + lp.dx*8, hz = pz + lp.dz*8, hy = poleH + 2;
+  const armW = 0.7;
+  quads.push({pts:[
+    [px-lp.dz*armW, poleH, pz+lp.dx*armW],
+    [px+lp.dz*armW, poleH, pz-lp.dx*armW],
+    [hx+lp.dz*armW, hy, hz-lp.dx*armW],
+    [hx-lp.dz*armW, hy, hz+lp.dx*armW],
+  ], color:poleColor});
+
+  const night = dayAmbient <= 0.55;
+  const lampColor = night ? 'rgb(255,222,145)' : 'rgb(58,58,62)';
+  const hr = 1.7;
+  quads.push({pts:[[hx-hr,hy,hz],[hx,hy+hr*0.7,hz],[hx+hr,hy,hz],[hx,hy-hr*0.7,hz]], color:lampColor});
+  quads.push({pts:[[hx,hy,hz-hr],[hx,hy+hr*0.7,hz],[hx,hy,hz+hr],[hx,hy-hr*0.7,hz]], color:lampColor});
+
+  if(night){
+    const alpha = clamp((0.55-dayAmbient)/0.35, 0, 1) * 0.22;
+    if(alpha > 0.01){
+      const r = 12;
+      quads.push({pts:[[hx-r,0.09,hz],[hx,0.09,hz-r],[hx+r,0.09,hz],[hx,0.09,hz+r]], color:`rgba(255,210,120,${alpha.toFixed(3)})`, depthBias: GROUND_DECAL_BIAS});
+    }
+  }
+  return quads;
+}
+
 // a British-style "ONE WAY" plate — white background, black border, black
 // arrow, with "ONE WAY" text rendered as real canvas text in the post-pass
 // below (see the oneWaySigns loop in drawScene), mounted facing oncoming
@@ -4600,6 +4665,13 @@ function drawScene(){
     if(d > RENDER_DIST*RENDER_DIST) continue;
     for(const f of buildSignQuads(sg)){
       allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
+    }
+  }
+  for(const lp of streetLamps){
+    const d = dist2(cam.x,cam.z,lp.x,lp.z);
+    if(d > RENDER_DIST*RENDER_DIST) continue;
+    for(const f of buildStreetLampQuads(lp)){
+      allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam) + (f.depthBias||0)});
     }
   }
   for(const sp of stopSignPoles){
