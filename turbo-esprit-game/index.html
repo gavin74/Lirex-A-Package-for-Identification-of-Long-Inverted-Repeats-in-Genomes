@@ -452,7 +452,21 @@ function generateCity(seed){
       const cellHalfX = (x2-x1)/2, cellHalfZ = (z2-z1)/2;
       const isGas = (i % 4 === 2 && j % 4 === 2);
       if(isGas){
-        const pad = {x:cx, z:cz, r:46};
+        // a gas station sits where a building normally would — set back
+        // from every bounding street, same as any other plot — but
+        // unlike a building there's actually somewhere to drive to in
+        // there. The player's own movement is locked to the street grid
+        // (streetCoord+lane), with no free steering and no turn possible
+        // except at a registered junction line, so without this the
+        // forecourt is physically unreachable even though nothing
+        // collides there: a queued turn just sits ignored until the next
+        // real junction. The south curb is used as a fixed "driveway"
+        // entrance: laneAxis/laneLine identify that street, laneCross is
+        // how far sideways (from that street's centerline) the pad sits,
+        // and alongCoord is where along the street the driveway lines up
+        // — see nearbyGasPad()/the player.parkPad steering in updatePlayer.
+        const pad = {x:cx, z:cz, r:46,
+          laneAxis:'x', laneLine: streetLinesZ[j], laneCross: cz-streetLinesZ[j], alongCoord: cx};
         pad.quads = buildStationQuads(pad);
         gasPads.push(pad);
         continue;
@@ -942,7 +956,7 @@ function makeCar(x,z,heading,color,maxSpeed){
            lane:0, laneOffset:0, streetCoord:0, laneHome:x,
            signal:null, signalTimer:0, fleeing:false, spinout:0,
            plannedTurn:null, turnSignalPlannedFor:null,
-           stopDwell:0, stopSignCleared:null};
+           stopDwell:0, stopSignCleared:null, parkPad:null};
 }
 
 // Driving directions as a 4-state cycle (compass convention: heading 0 =
@@ -1822,8 +1836,41 @@ function changeLane(side){
   setSignal(player, side, 0.8);
 }
 
+// is there a gas station right alongside the player, on the named side,
+// close enough to pull into? Only matches a pad whose driveway street is
+// the exact street the player is currently on (laneAxis+laneLine), within
+// a short window of where that driveway actually lines up (alongCoord).
+function nearbyGasPad(side){
+  const forward = player.axis==='z' ? player.z : player.x;
+  const rightSign = player.dir * (player.axis==='z' ? 1 : -1);
+  for(const pad of gasPads){
+    if(pad.laneAxis !== player.axis) continue;
+    if(Math.abs(player.streetCoord - pad.laneLine) > 0.5) continue;
+    if(Math.abs(forward - pad.alongCoord) > 70) continue;
+    const padSide = Math.sign(pad.laneCross) === rightSign ? 'right' : 'left';
+    if(padSide === side) return pad;
+  }
+  return null;
+}
+
+// Q/E queue a turn at the next junction by default, but a gas station
+// right alongside takes priority — there's no junction to turn at there
+// (see the pad.laneAxis/laneCross comment in generateCity), so pressing
+// toward it instead toggles a direct pull-in/pull-out steer (updatePlayer).
 function queueTurn(side){
   if(gameState!=='playing' || !player) return;
+  if(player.parkPad){
+    // already pulled in — either side pulls back out onto the street
+    player.parkPad = null;
+    setSignal(player, side, 2.5);
+    return;
+  }
+  const pad = nearbyGasPad(side);
+  if(pad){
+    player.parkPad = pad;
+    setSignal(player, side, 2.5);
+    return;
+  }
   player.pendingTurn = side;
   setSignal(player, side, 2.5);
 }
@@ -1902,12 +1949,15 @@ function updatePlayer(dt){
   // collision circle with no way to move forward again (only reversing
   // escaped it, which read as the car just freezing at a junction)
   player.laneHome = player.streetCoord + player.lane * LANE_OFFSET;
-  const avoid = obstacleAvoidOffset(player);
+  const avoid = player.parkPad ? 0 : obstacleAvoidOffset(player);
 
   // ease toward the target lane (exponential approach, fast at first and
   // slowing into place) rather than a constant-speed slide that just snaps
-  // the instant it arrives — reads as a much smoother lane change
-  const targetOffset = player.lane * LANE_OFFSET + avoid;
+  // the instant it arrives — reads as a much smoother lane change. Pulled
+  // into a gas station (player.parkPad), the same easing steers toward
+  // the pad's cross-position instead of a normal lane slot — see
+  // nearbyGasPad()/queueTurn().
+  const targetOffset = player.parkPad ? player.parkPad.laneCross : (player.lane * LANE_OFFSET + avoid);
   const prevLaneOffset = player.laneOffset;
   const laneEase = 1 - Math.exp(-LANE_SPEED/LANE_OFFSET*dt);
   player.laneOffset += (targetOffset - player.laneOffset) * laneEase;
