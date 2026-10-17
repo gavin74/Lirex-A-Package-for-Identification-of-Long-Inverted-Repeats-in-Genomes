@@ -4477,7 +4477,7 @@ function buildHelicopterQuads(h){
 // the 3D city has painted — drawn early instead, same as the sky itself,
 // nearby buildings covered most of the sky band from any normal street
 // view and the moon was rarely actually visible.
-function drawMoon(){
+function drawMoon(cam){
   const moonAlpha = clamp((0.55 - dayAmbient) / 0.4, 0, 1);
   if(moonAlpha < 0.02) return;
   const cx = ((dayClock*1.5) % (W+260)) - 130;
@@ -4486,6 +4486,28 @@ function drawMoon(){
   // parked at y=34 it drifted directly behind them for most of its pass
   const cy = 165 + Math.sin(dayClock*0.015)*12;
   const r = 22;
+
+  // the moon has no real world position (it's a screen-space decoration
+  // drifting on its own clock, not a true sky object), which is why this
+  // used to draw unconditionally on top of the whole 3D scene — it had to,
+  // the earlier attempt at drawing it early (like the sky) left it hidden
+  // behind nearby buildings for most of a pass, since any normal street
+  // view has them filling most of the sky band. The fix isn't choosing
+  // early vs late, it's giving it an actual occlusion test: back-project
+  // its current screen position through the camera's current heading/
+  // pitch to a plausible world point (inverting toCamSpace/toScreen) and
+  // check that against the building list the same way billboard slogans
+  // and sign text already do.
+  const D = 500;
+  const camX = (cx-W/2)*D/FOV_FOCAL, camY = (HORIZON_Y-cy)*D/FOV_FOCAL;
+  const sp = Math.sin(cam.pitch), cp = Math.cos(cam.pitch);
+  const dy_ = camY*cp + D*sp, rz = -camY*sp + D*cp;
+  const s = Math.sin(cam.heading), c = Math.cos(cam.heading);
+  const wx = cam.x + c*camX + s*rz, wz = cam.z - s*camX + c*rz;
+  for(const b of buildings){
+    if(segmentHitsBox(cam.x, cam.z, wx, wz, b.x1, b.x2, b.z1, b.z2)) return;
+  }
+
   ctx.save();
   ctx.beginPath();
   ctx.rect(0,0,W,HORIZON_Y);
@@ -5017,7 +5039,7 @@ function drawScene(){
     signText(sp, 'STOP', 520);
   }
 
-  drawMoon();
+  drawMoon(cam);
   drawRain();
   drawLightning();
 }
