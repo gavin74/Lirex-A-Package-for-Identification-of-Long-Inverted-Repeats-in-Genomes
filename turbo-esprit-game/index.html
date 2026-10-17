@@ -92,6 +92,8 @@
   .blinkerR{border-top:9px solid transparent;border-bottom:9px solid transparent;border-left:15px solid var(--accent)}
   .clickable{cursor:pointer;pointer-events:auto;color:var(--good)}
   #hudSide{display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
+  #damageBar{width:100%;height:5px;background:rgba(255,255,255,.08);margin:-3px 0 2px;border-radius:2px;overflow:hidden}
+  #damageBarFill{height:100%;width:0%;background:var(--good);transition:width .2s,background .2s}
 
   #banner{
     position:absolute;left:50%;top:38%;transform:translate(-50%,-50%);
@@ -156,6 +158,8 @@
       <div class="row"><span class="label">TIME</span><span id="hudTime">12:00</span></div>
       <div class="row"><span class="label">SCORE</span><span id="hudScore">0</span></div>
       <div class="row"><span class="label">CAUGHT</span><span id="hudCaught">0</span></div>
+      <div class="row"><span class="label">DAMAGE</span><span id="hudDamage">0%</span></div>
+      <div id="damageBar"><div id="damageBarFill"></div></div>
       <div class="row"><span class="label">SOUND (M)</span><span id="hudSound" class="clickable">ON</span></div>
     </div>
   </div>
@@ -1006,7 +1010,7 @@ let bullets = [];
 let oilSlicks = []; // {x,z,life} — dropped behind the player, spins out anything that drives over it
 const OIL_COOLDOWN = 4, OIL_LIFE = 16, OIL_RADIUS = 13;
 const CIVILIAN_COLORS = ['#b9bdb2', '#8a9bb0', '#a98f6e', '#8f8f94', '#9bb08a', '#b08a8a'];
-let score, caught, fuel, gameState, roundLevel;
+let score, caught, fuel, gameState, roundLevel, damage;
 let lastSuspectSpawnGuardTimer = 0;
 let bannerTimer = 0;
 const SHAKE_DURATION = 0.3;
@@ -1044,7 +1048,7 @@ function resetGame(){
   document.getElementById('overlay').classList.add('hidden');
   generateCity(Date.now() % 100000);
   player = spawnPlayerStart();
-  score = 0; caught = 0; fuel = START_FUEL;
+  score = 0; caught = 0; fuel = START_FUEL; damage = 0;
   roundLevel = 0;
   worldTime = 0;
   bullets = [];
@@ -2030,13 +2034,22 @@ function updatePlayer(dt){
 
   player.crashCooldown -= dt;
   if(hit){
+    const impactSpeed = Math.abs(player.speed);
     player.speed = 0; // stop dead on impact, not a damped carry-through
     if(player.crashCooldown <= 0){
       fuel -= 3;
+      // harder impacts do more damage — a gentle nudge barely registers,
+      // slamming in at speed can take a real chunk off in one hit
+      damage = clamp(damage + clamp(impactSpeed/player.maxSpeed, 0, 1) * 22, 0, 100);
       showBanner('CRASH!', 0.6);
       player.crashCooldown = 0.8;
       SFX.crash();
       shakeTimer = SHAKE_DURATION;
+      if(damage >= 100 && gameState === 'playing'){
+        gameState = 'over';
+        Engine.update(0, 1, false, false);
+        showEndPanel('WRECKED');
+      }
     }
   }
 
@@ -3348,6 +3361,32 @@ function buildBrakeGlow(car){
   return quads;
 }
 
+// once the player's own car takes enough damage it visibly catches fire —
+// a few flickering fire-colored glow blobs (the same radial-gradient
+// trick every other light in the game uses) scattered over the body,
+// growing in size/intensity and flicker as damage climbs toward total
+// loss. Only the player has a damage stat right now, so only the player
+// burns.
+const FLAME_DAMAGE_THRESHOLD = 65;
+function buildDamageFlames(car){
+  if(car !== player || damage < FLAME_DAMAGE_THRESHOLD) return [];
+  const t = clamp((damage-FLAME_DAMAGE_THRESHOLD)/(100-FLAME_DAMAGE_THRESHOLD), 0, 1);
+  const d = VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car;
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
+  const quads = [];
+  const spots = [[-d[0]*0.4, d[1]*0.25], [d[0]*0.4, -d[2]*0.3], [0, -d[2]*0.1]];
+  let i = 0;
+  for(const [lx,lz] of spots){
+    const flicker = 0.78 + Math.sin(worldTime*21 + i*7) * 0.14 + Math.sin(worldTime*53 + i*3) * 0.08;
+    const p = tw(lx, 4.2, lz);
+    quads.push(...buildGlowQuads(p[0],p[1],p[2], (2.2+3.2*t)*flicker, [255,110,25], 0.55*t*flicker));
+    quads.push(...buildGlowQuads(p[0],p[1]+1.4,p[2], (1+2.2*t)*flicker, [255,205,90], 0.6*t*flicker));
+    i++;
+  }
+  return quads;
+}
+
 function buildVehicleQuads(car){
   let body;
   if(car.type === 'motorbike') body = buildMotorbikeQuads(car);
@@ -3360,7 +3399,7 @@ function buildVehicleQuads(car){
   else if(car.type === 'van') body = buildVanQuads(car);
   else if(car.type === 'sports') body = buildSportsQuads(car);
   else body = buildCarQuads(car);
-  return [...buildVehicleShadow(car), ...buildHeadlightBeam(car), ...buildHeadlightGlow(car), ...buildBrakeGlow(car), ...body];
+  return [...buildVehicleShadow(car), ...buildHeadlightBeam(car), ...buildHeadlightGlow(car), ...buildBrakeGlow(car), ...buildDamageFlames(car), ...body];
 }
 
 // A small low-poly car: a chassis slab, a cabin/greenhouse with tinted
@@ -5266,6 +5305,10 @@ function updateHUD(){
   }
   document.getElementById('hudScore').textContent = score;
   document.getElementById('hudCaught').textContent = caught;
+  document.getElementById('hudDamage').textContent = Math.round(damage) + '%';
+  const dmgFill = document.getElementById('damageBarFill');
+  dmgFill.style.width = damage + '%';
+  dmgFill.style.background = damage < 50 ? 'var(--good)' : damage < 80 ? '#d9a53a' : '#d9503a';
   // dashboard turn-signal indicators — same blinkOn clock the car's own
   // signal lights already blink on, just mirrored onto the HUD
   document.getElementById('blinkerL').classList.toggle('lit', blinkOn && player.signal==='left');
@@ -5310,7 +5353,7 @@ motorbikes = [spawnStreetCar('#ff6a3d', 180, 'motorbike')];
 vans = [spawnStreetCar('#9aa08f', 80, 'van')];
 ebikes = [spawnStreetCar('#6fa070', 60, 'ebike')];
 civilians = [spawnStreetCar(CIVILIAN_COLORS[0], 110)];
-score = 0; caught = 0; fuel = START_FUEL;
+score = 0; caught = 0; fuel = START_FUEL; damage = 0;
 gameState = 'start';
 requestAnimationFrame(frame);
 
