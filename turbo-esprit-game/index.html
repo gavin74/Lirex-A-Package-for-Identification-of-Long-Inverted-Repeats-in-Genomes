@@ -2143,11 +2143,30 @@ function collideWorld(x, z, r){
     const cx = clamp(x, m.x1, m.x2), cz = clamp(z, m.z1, m.z2);
     if(dist2(x,z,cx,cz) < r*r) return true;
   }
-  const vehicleR = r+8;
+  // the old vehicleR was a single circle (r+8) covering every direction
+  // equally — fine for a car ahead in the SAME lane, but it also fired
+  // the instant you drew level with a car in the NEXT lane over, since
+  // adjacent lanes are only LANE_OFFSET (16) units apart and the circle's
+  // radius (17) already reached past that, making it impossible to
+  // overtake without clipping. Traffic is grid-aligned (heading is
+  // always cardinal), so check lateral and longitudinal clearance
+  // separately instead of one all-directions radius: a tight lateral
+  // margin lets two cars pass side by side in adjacent lanes, while the
+  // longitudinal margin (same as the old radius) keeps following/merging
+  // distance unchanged.
+  const longMargin = r+8, latMargin = r-1.5;
   for(const c of allTraffic()){
-    if(dist2(x,z,c.x,c.z) < vehicleR*vehicleR) return true;
+    const dx = x-c.x, dz = z-c.z;
+    const along = c.axis==='z' ? Math.abs(dz) : Math.abs(dx);
+    const across = c.axis==='z' ? Math.abs(dx) : Math.abs(dz);
+    if(along < longMargin && across < latMargin) return true;
   }
-  if(suspect && dist2(x,z,suspect.x,suspect.z) < vehicleR*vehicleR) return true;
+  if(suspect){
+    const dx = x-suspect.x, dz = z-suspect.z;
+    const along = suspect.axis==='z' ? Math.abs(dz) : Math.abs(dx);
+    const across = suspect.axis==='z' ? Math.abs(dx) : Math.abs(dz);
+    if(along < longMargin && across < latMargin) return true;
+  }
   return false;
 }
 
