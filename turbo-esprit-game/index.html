@@ -4973,6 +4973,40 @@ function drawScene(){
     ctx.restore();
   }
 
+  // "STOP"/"GIVE WAY" text on their own signs — same real-canvas-text +
+  // building-occlusion treatment as the ONE WAY plates above. The panel
+  // itself (buildSignQuads) is just a plain red diamond/triangle with no
+  // room for actual lettering in the flat-quad pipeline, same reason the
+  // one-way arrow needed this treatment.
+  const signText = (sg, label, scale) => {
+    if(dist2(cam.x,cam.z,sg.x,sg.z) > (RENDER_DIST*0.6)*(RENDER_DIST*0.6)) return;
+    const wx = sg.axis==='x' ? sg.x-0.3 : sg.x;
+    const wz = sg.axis==='z' ? sg.z-0.3 : sg.z;
+    const wy = 30;
+    for(const b of buildings){
+      if(segmentHitsBox(cam.x, cam.z, wx, wz, b.x1, b.x2, b.z1, b.z2)) return;
+    }
+    const camP = toCamSpace(wx, wy, wz, cam);
+    if(camP.z <= NEAR) return;
+    const screen = toScreen(camP);
+    if(screen.x < -200 || screen.x > W+200 || screen.y < -100 || screen.y > H+100) return;
+    const fontSize = clamp(scale/camP.z, 3, 9);
+    ctx.save();
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.fillStyle = 'rgba(246,246,240,0.95)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, screen.x, screen.y);
+    ctx.restore();
+  };
+  for(const sg of signs){
+    if(sg.type==='stop') signText(sg, 'STOP', 520);
+    else if(sg.type==='give_way') signText(sg, 'GIVE WAY', 420);
+  }
+  for(const sp of stopSignPoles){
+    signText(sp, 'STOP', 520);
+  }
+
   drawMoon();
   drawRain();
   drawLightning();
@@ -5045,6 +5079,27 @@ function drawMinimap(){
     }
   }
   dot(player.x, player.z, '#ffffff', 3);
+
+  // a compass: the map itself is always north-up (screen y = oz - z*scale,
+  // never rotated to face the player), so "N" at the top is a fixed label,
+  // plus a small heading arrow on the player's own dot showing which way
+  // they're actually facing — heading 0 is north and increases clockwise
+  // (see cardinalHeading), which maps directly onto this screen's axes:
+  // sin(heading) is screen +x (east, right), -cos(heading) is screen -y
+  // (north, up).
+  const px = ox+player.x*scale, py = oz-player.z*scale;
+  const hs = Math.sin(player.heading), hc = -Math.cos(player.heading);
+  mctx.strokeStyle = '#ffffff';
+  mctx.lineWidth = 1.5;
+  mctx.beginPath();
+  mctx.moveTo(px, py);
+  mctx.lineTo(px+hs*9, py+hc*9);
+  mctx.stroke();
+  mctx.fillStyle = '#ffffff';
+  mctx.font = 'bold 9px monospace';
+  mctx.textAlign = 'center';
+  mctx.textBaseline = 'top';
+  mctx.fillText('N', 70, 2);
 }
 
 // a classic automotive dial: 270-degree sweep from lower-left (empty)
