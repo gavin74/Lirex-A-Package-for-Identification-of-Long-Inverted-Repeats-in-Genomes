@@ -736,6 +736,18 @@ function generateCity(seed){
   // clears the carriageway; spacing is generous (half a block) since
   // night's own shorter RENDER_DIST means only a handful are ever in view
   // at once regardless of how many exist across the whole map.
+  // a lamp placed purely by its OWN street's curb offset can still land
+  // inside a CROSS street's much wider carriageway at a junction (a lamp
+  // hugging a narrow minor-street curb is well short of where a crossing
+  // arterial's own lanes actually end) — landing it in the middle of that
+  // wider road. Skip any position within a crossing line's own road-half
+  // (plus a little clearance) of any junction along the way.
+  const nearAJunction = (coord, crossLines, crossHalves) => {
+    for(let j=0;j<crossLines.length;j++){
+      if(Math.abs(coord-crossLines[j]) < crossHalves[j]+12) return true;
+    }
+    return false;
+  };
   streetLamps = [];
   const LAMP_SPACING = 300, LAMP_MARGIN = 40;
   for(let i=0;i<streetLinesX.length;i++){
@@ -743,6 +755,7 @@ function generateCity(seed){
     let idx = 0;
     for(let z=-worldHalfZ+LAMP_MARGIN; z<worldHalfZ-LAMP_MARGIN; z+=LAMP_SPACING, idx++){
       const s = idx%2===0 ? 1 : -1;
+      if(nearAJunction(z, streetLinesZ, roadHalfZ)) continue;
       streetLamps.push({x:line+s*curbOff, z, dx:-s, dz:0});
     }
   }
@@ -751,6 +764,7 @@ function generateCity(seed){
     let idx = 0;
     for(let x=-worldHalfX+LAMP_MARGIN; x<worldHalfX-LAMP_MARGIN; x+=LAMP_SPACING, idx++){
       const s = idx%2===0 ? 1 : -1;
+      if(nearAJunction(x, streetLinesX, roadHalfX)) continue;
       streetLamps.push({x, z:line+s*curbOff, dx:0, dz:-s});
     }
   }
@@ -1961,7 +1975,8 @@ function updatePlayer(dt){
   }
 
   if(FUEL_ENABLED){
-    fuel -= dt * (1.1 + Math.abs(player.speed)/260*3.2);
+    // 1/10th the old burn rate — a full tank now runs ~10x longer
+    fuel -= dt * (1.1 + Math.abs(player.speed)/260*3.2) / 10;
     fuel = clamp(fuel, 0, 100);
 
     for(const pad of gasPads){
@@ -4143,15 +4158,18 @@ function buildSignQuads(sg){
 // already uses, so lamps and headlights come on together.
 function buildStreetLampQuads(lp){
   const quads = [];
-  const poleH = 19, px = lp.x, pz = lp.z;
+  // taller pole and a much longer overhanging arm — Turbo Esprit's own
+  // streetlights cantilever well out over the carriageway, not just a
+  // token foot or two past the curb
+  const poleH = 24, px = lp.x, pz = lp.z;
   const poleColor = 'rgb(68,70,74)';
   quads.push({pts:[[px-0.8,0,pz],[px-0.8,poleH,pz],[px+0.8,poleH,pz],[px+0.8,0,pz]], color:poleColor});
   quads.push({pts:[[px,0,pz-0.8],[px,poleH,pz-0.8],[px,poleH,pz+0.8],[px,0,pz+0.8]], color:poleColor});
 
   // the arm reaches from the pole top out over the road, in whichever
   // direction lp.dx/lp.dz point (toward the street, away from the curb)
-  const hx = px + lp.dx*8, hz = pz + lp.dz*8, hy = poleH + 2;
-  const armW = 0.7;
+  const hx = px + lp.dx*24, hz = pz + lp.dz*24, hy = poleH + 1.5;
+  const armW = 0.9;
   quads.push({pts:[
     [px-lp.dz*armW, poleH, pz+lp.dx*armW],
     [px+lp.dz*armW, poleH, pz-lp.dx*armW],
@@ -4174,7 +4192,7 @@ function buildStreetLampQuads(lp){
     quads.push(...buildGlowQuads(hx, hy, hz, 2.0, [255,230,170], alpha*0.5));
     const poolAlpha = alpha * 0.22;
     if(poolAlpha > 0.01){
-      const r = 12;
+      const r = 15;
       quads.push({pts:[[hx-r,0.09,hz],[hx,0.09,hz-r],[hx+r,0.09,hz],[hx,0.09,hz+r]], color:`rgba(255,210,120,${poolAlpha.toFixed(3)})`, depthBias: GROUND_DECAL_BIAS});
     }
   }
