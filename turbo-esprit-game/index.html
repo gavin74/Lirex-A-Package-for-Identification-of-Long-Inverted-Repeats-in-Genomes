@@ -290,6 +290,12 @@ const LANE_SPEED = 70;             // lateral units/sec when changing lanes
 const TURN_RATE = 3.6;             // rad/sec every car's visual heading animates at —
                                     // slow enough that a turn clearly reads as motion
                                     // instead of snapping/blinking into the new heading
+const CAM_HEADING_RATE = 2.4;      // exponential catch-up rate for the chase camera's
+                                    // own trailing heading (player.camHeading) — the
+                                    // camera used to pivot in perfect lockstep with the
+                                    // car's own heading, reading as the view "turning
+                                    // with" (or even slightly ahead of) the car instead
+                                    // of catching up a beat after, like the original
 const JUNCTION_WINDOW = 70;        // how close to a crossing a turn can be started —
                                     // wide on purpose, turning was too easy to miss
 const FUEL_ENABLED = true;         // gas stations now actually matter — find one before the tank runs dry
@@ -2030,6 +2036,17 @@ function updatePlayer(dt){
 
   updatePendingTurn();
   approachHeading(player, dt, TURN_RATE);
+
+  // the chase camera trails the car's own heading by a beat instead of
+  // pivoting in perfect lockstep with it (drawScene reads this instead of
+  // player.heading directly) — in the original, the camera visibly caught
+  // up after the car had already turned, rather than turning with it
+  if(player.camHeading === undefined) player.camHeading = player.heading;
+  let camGap = player.heading - player.camHeading;
+  while(camGap > Math.PI) camGap -= Math.PI*2;
+  while(camGap < -Math.PI) camGap += Math.PI*2;
+  player.camHeading += camGap * (1 - Math.exp(-CAM_HEADING_RATE*dt));
+
   player.gunCooldown -= dt;
   player.oilCooldown -= dt;
 
@@ -5028,14 +5045,20 @@ function drawScene(){
     };
   } else {
     const camPreset = CAMERA_PRESETS[cameraMode] || CAMERA_PRESETS.close;
+    // camHeading (eased toward player.heading in updatePlayer, see
+    // CAM_HEADING_RATE) trails the car's actual heading — using it for
+    // BOTH the camera's position offset and its view direction is what
+    // makes the camera visibly swing/catch up after a turn instead of
+    // pivoting around the car in perfect lockstep with it
+    const ch = player.camHeading ?? player.heading;
     cam = {
-      x: player.x - Math.sin(player.heading)*camPreset.back + (Math.random()*2-1)*shakeMag,
-      z: player.z - Math.cos(player.heading)*camPreset.back + (Math.random()*2-1)*shakeMag,
+      x: player.x - Math.sin(ch)*camPreset.back + (Math.random()*2-1)*shakeMag,
+      z: player.z - Math.cos(ch)*camPreset.back + (Math.random()*2-1)*shakeMag,
       // rises partway with a roadworks-ramp jump (player.y) so a launch
       // actually reads as the car leaving the ground instead of the
       // camera staying dead level while the body floats up in front of it
       y: camPreset.height + (player.y||0)*0.6 + (Math.random()*2-1)*shakeMag*0.5,
-      heading: player.heading,
+      heading: ch,
       pitch: camPreset.pitch
     };
   }
