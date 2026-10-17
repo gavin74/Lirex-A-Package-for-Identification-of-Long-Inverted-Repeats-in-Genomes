@@ -147,6 +147,7 @@
     </div>
     <canvas id="minimap" width="150" height="150"></canvas>
     <div id="hudSide" class="box" style="text-align:right">
+      <div class="row"><span class="label">TIME</span><span id="hudTime">12:00</span></div>
       <div class="row"><span class="label">SCORE</span><span id="hudScore">0</span></div>
       <div class="row"><span class="label">CAUGHT</span><span id="hudCaught">0</span></div>
       <div class="row"><span class="label">SOUND (M)</span><span id="hudSound" class="clickable">ON</span></div>
@@ -5000,6 +5001,16 @@ function updateHUD(){
     const gearPos = spd <= 1 ? 0 : (spd % span) / span;
     const revFrac = 0.08 + gearPos*0.92; // idle reading, never a dead zero at a stop
     drawDialGauge(document.getElementById('revDial'), revFrac, '#d9503a', 'REV');
+  }
+  // the in-game clock, read straight off the same dayClock/DAY_LENGTH the
+  // sky, lighting and street clock towers already animate from — p=0 is
+  // dawn (DAY_KEYFRAMES puts it at 6am), so the mapping just rotates the
+  // 24-hour wheel to start there instead of at midnight
+  {
+    const p = (dayClock % DAY_LENGTH) / DAY_LENGTH;
+    const t = (6 + p*24) % 24;
+    const hh = Math.floor(t), mm = Math.floor((t-hh)*60);
+    document.getElementById('hudTime').textContent = `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
   }
   document.getElementById('hudScore').textContent = score;
   document.getElementById('hudCaught').textContent = caught;
