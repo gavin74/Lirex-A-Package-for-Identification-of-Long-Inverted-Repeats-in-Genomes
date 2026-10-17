@@ -421,9 +421,19 @@ function generateCity(seed){
   streetLinesZ = [];
   for(let i=0;i<=BLOCKS_X;i++) streetLinesX.push((i-BLOCKS_X/2)*BLOCK);
   for(let j=0;j<=BLOCKS_Z;j++) streetLinesZ.push((j-BLOCKS_Z/2)*BLOCK);
+  // the two perimeter lines on each axis (index 0 and BLOCKS_X/Z) are the
+  // one-way loop streets running right along the world wall — i%STEP===0
+  // happened to also tag index 0 as arterial, giving it a 3-lane+turn-lane
+  // width its opposite perimeter street (index BLOCKS_X/Z, never a
+  // multiple of 3 here) didn't get, so the loop had two different widths
+  // on either side of the map. Worse, that arterial's wider lane
+  // structure, centered exactly on the world edge, reached past where the
+  // player's own position is clamped. Perimeter streets are excluded from
+  // ever being arterial so the whole loop is one consistent (and already
+  // edge-appropriate) width.
   const ARTERIAL_STEP = 3;
-  isArterialX = streetLinesX.map((_, i) => i % ARTERIAL_STEP === 0);
-  isArterialZ = streetLinesZ.map((_, i) => i % ARTERIAL_STEP === 0);
+  isArterialX = streetLinesX.map((_, i) => i % ARTERIAL_STEP === 0 && i !== 0 && i !== BLOCKS_X);
+  isArterialZ = streetLinesZ.map((_, i) => i % ARTERIAL_STEP === 0 && i !== 0 && i !== BLOCKS_Z);
   roadHalfX = isArterialX.map(a => a ? ROAD_HALF_ARTERIAL : ROAD_HALF_MINOR);
   roadHalfZ = isArterialZ.map(a => a ? ROAD_HALF_ARTERIAL : ROAD_HALF_MINOR);
 
