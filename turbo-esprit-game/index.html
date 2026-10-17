@@ -992,12 +992,27 @@ function setSignal(car, side, duration){
 }
 
 // animates car.heading toward car.targetHeading at a fixed angular rate,
-// always taking the shorter way around
+// always taking the shorter way around — eased in over a brief window
+// right after the target changes (smoothstep ramp from a low floor up
+// to the full rate) rather than engaging the full angular speed the
+// instant a turn is commanded, which read as a jerky snap at the start
+// of every turn. Only the first beat is eased; once up to speed it
+// holds the same constant rate as before; so overall turn duration is
+// barely affected.
 function approachHeading(car, dt, rate){
   let delta = car.targetHeading - car.heading;
   while(delta > Math.PI) delta -= Math.PI*2;
   while(delta < -Math.PI) delta += Math.PI*2;
-  const maxStep = rate*dt;
+  if(car.targetHeading !== car._lastTargetHeading){
+    car._lastTargetHeading = car.targetHeading;
+    car.turnEaseT = 0;
+  }
+  car.turnEaseT = (car.turnEaseT||0) + dt;
+  const EASE_WINDOW = 0.18, EASE_FLOOR = 0.2;
+  const easeFrac = clamp(car.turnEaseT/EASE_WINDOW, 0, 1);
+  const smooth = easeFrac*easeFrac*(3-2*easeFrac);
+  const effRate = rate * Math.max(smooth, EASE_FLOOR);
+  const maxStep = effRate*dt;
   if(Math.abs(delta) <= maxStep) car.heading = car.targetHeading;
   else car.heading += Math.sign(delta)*maxStep;
 }
