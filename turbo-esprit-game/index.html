@@ -1097,14 +1097,22 @@ function setSignal(car, side, duration){
   car.signalTimer = duration;
 }
 
-// animates car.heading toward car.targetHeading at a fixed angular rate,
-// always taking the shorter way around — eased in over a brief window
-// right after the target changes (smoothstep ramp from a low floor up
-// to the full rate) rather than engaging the full angular speed the
-// instant a turn is commanded, which read as a jerky snap at the start
-// of every turn. Only the first beat is eased; once up to speed it
-// holds the same constant rate as before; so overall turn duration is
-// barely affected.
+// animates car.heading toward car.targetHeading at a speed-dependent
+// angular rate, always taking the shorter way around — eased in over a
+// brief window right after the target changes (smoothstep ramp from a low
+// floor up to the full rate) rather than engaging the full angular speed
+// the instant a turn is commanded, which read as a jerky snap at the start
+// of every turn. Only the first beat is eased; once up to speed it holds
+// the same rate as before; so overall turn duration is barely affected
+// beyond the speed scaling below.
+//
+// A flat rate regardless of speed meant a junction turn taken at a crawl
+// and one taken flat-out swung the heading exactly as fast — read as the
+// car pivoting on the spot rather than actually cornering. Real cars (and
+// the turn circle a real steering wheel gives you) turn tighter at low
+// speed and sweep wider at speed, so scale the rate by how fast THIS car
+// is currently going, same formula for every car (player, traffic, the
+// suspect) since they all carry speed/maxSpeed the same way.
 function approachHeading(car, dt, rate){
   let delta = car.targetHeading - car.heading;
   while(delta > Math.PI) delta -= Math.PI*2;
@@ -1117,7 +1125,9 @@ function approachHeading(car, dt, rate){
   const EASE_WINDOW = 0.18, EASE_FLOOR = 0.2;
   const easeFrac = clamp(car.turnEaseT/EASE_WINDOW, 0, 1);
   const smooth = easeFrac*easeFrac*(3-2*easeFrac);
-  const effRate = rate * Math.max(smooth, EASE_FLOOR);
+  const speedFrac = clamp(Math.abs(car.speed)/car.maxSpeed, 0, 1);
+  const speedMul = lerp(1.35, 0.55, speedFrac);
+  const effRate = rate * speedMul * Math.max(smooth, EASE_FLOOR);
   const maxStep = effRate*dt;
   if(Math.abs(delta) <= maxStep) car.heading = car.targetHeading;
   else car.heading += Math.sign(delta)*maxStep;
@@ -2855,7 +2865,10 @@ function checkPlayerViolations(dt){
   for(const p of pedestrianPositions()){
     if(dist2(player.x,player.z,p.x,p.z) < 12*12 && Math.abs(player.speed) > 15){
       triggerWanted('HIT A PEDESTRIAN');
-      player.speed *= 0.3;
+      // same bounded bleed-down as clipping traffic (see hazardSlowT near
+      // the top of updatePlayer) instead of a one-frame snap to 30%
+      player.hazardSlowFloor = Math.abs(player.speed) * 0.3;
+      player.hazardSlowT = 0.3;
       player.violateCooldown = 2;
       return;
     }
@@ -2863,7 +2876,8 @@ function checkPlayerViolations(dt){
   for(const d of dogPositions()){
     if(dist2(player.x,player.z,d.x,d.z) < 10*10 && Math.abs(player.speed) > 15){
       triggerWanted('HIT A DOG');
-      player.speed *= 0.3;
+      player.hazardSlowFloor = Math.abs(player.speed) * 0.3;
+      player.hazardSlowT = 0.3;
       player.violateCooldown = 2;
       return;
     }
