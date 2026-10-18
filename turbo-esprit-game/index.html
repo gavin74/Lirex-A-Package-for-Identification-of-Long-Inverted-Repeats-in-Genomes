@@ -5870,6 +5870,19 @@ function drawMinimap(){
     const w = (b.x2-b.x1)*scale, h = (b.z2-b.z1)*scale;
     mctx.fillRect(x,y,w,h);
   }
+  // faint street grid matching the N#/E# map-reference scheme radio
+  // chatter speaks (streetLabel/nearestStreetRef) -- the numbered edge
+  // ticks drawn later tell you which line is which.
+  mctx.strokeStyle = 'rgba(190,200,210,0.16)';
+  mctx.lineWidth = 1;
+  for(const sxw of streetLinesX){
+    const sx = ox + sxw*scale;
+    mctx.beginPath(); mctx.moveTo(sx, 0); mctx.lineTo(sx, 140); mctx.stroke();
+  }
+  for(const szw of streetLinesZ){
+    const sy = oz - szw*scale;
+    mctx.beginPath(); mctx.moveTo(0, sy); mctx.lineTo(140, sy); mctx.stroke();
+  }
   mctx.fillStyle = 'rgba(220,210,170,0.7)';
   for(const pad of gasPads){
     mctx.fillRect(ox+(pad.x-36)*scale, oz-(pad.z+22)*scale, 72*scale, 44*scale);
@@ -5929,6 +5942,30 @@ function drawMinimap(){
   mctx.fillText('E', 130, 70);
   mctx.textAlign = 'right';
   mctx.fillText('W', 10, 70);
+
+  // numbered street-reference ticks -- same streetLabel(axis, idx) index
+  // ("N7", "E9", ...) the radio dispatch uses, so hearing e.g. "near
+  // N9/E12" is something you can actually find on the map, not just a
+  // compass direction. Skipped near the centre of each edge so they
+  // don't collide with the bold N/S/E/W compass letters there.
+  mctx.font = '6px monospace';
+  mctx.fillStyle = 'rgba(205,215,225,0.8)';
+  for(let i=0;i<streetLinesX.length;i++){
+    if(i%2 !== 0) continue; // every other line only -- adjacent labels overlap at this scale
+    const sx = ox + streetLinesX[i]*scale;
+    if(sx < 8 || sx > 132 || Math.abs(sx-70) < 7) continue;
+    mctx.textAlign = 'center';
+    mctx.textBaseline = 'top';
+    mctx.fillText('N'+(i+1), sx, 9);
+  }
+  for(let j=0;j<streetLinesZ.length;j++){
+    if(j%2 !== 0) continue;
+    const sy = oz - streetLinesZ[j]*scale;
+    if(sy < 4 || sy > 136 || Math.abs(sy-70) < 7) continue;
+    mctx.textAlign = 'left';
+    mctx.textBaseline = 'middle';
+    mctx.fillText('E'+(j+1), 122, sy);
+  }
 
   const px = ox+player.x*scale, py = oz-player.z*scale;
   if(MINIMAP_CAR_IMG.complete && MINIMAP_CAR_IMG.naturalWidth > 0){
