@@ -2808,6 +2808,63 @@ function cycleRadio(){
   showBanner(radioStation ? 'RADIO: ' + radioStation.toUpperCase() : 'RADIO OFF', 1.0);
 }
 
+// street map references, same scheme the original's own manual describes:
+// "E.9 is the ninth street going east-west; N.7 is the seventh street
+// going north-south" — streetLinesX are the north-south-running streets
+// (a car driving along one has axis 'z'), streetLinesZ are the
+// east-west-running streets (axis 'x'), both just their 1-based index in
+// the grid.
+function streetLabel(axis, idx){ return (axis==='x' ? 'N' : 'E') + idx; }
+function nearestStreetRef(x, z){
+  let bestXi = 0, bestXd = Infinity;
+  for(let i=0;i<streetLinesX.length;i++){
+    const d = Math.abs(streetLinesX[i]-x);
+    if(d < bestXd){ bestXd = d; bestXi = i; }
+  }
+  let bestZi = 0, bestZd = Infinity;
+  for(let i=0;i<streetLinesZ.length;i++){
+    const d = Math.abs(streetLinesZ[i]-z);
+    if(d < bestZd){ bestZd = d; bestZi = i; }
+  }
+  return streetLabel('x', bestXi+1) + '/' + streetLabel('z', bestZi+1);
+}
+
+// occasional dispatch-radio chatter naming the suspect's approximate
+// location by map reference — a real gameplay hint (use the map to
+// narrow down where to lie in wait), not just flavor. A real spoken
+// voice line via the browser's own speech synthesis when available,
+// always backed by a banner line so it still reads with sound off.
+const CHATTER_LINES = [
+  'DISPATCH: SUSPECT LAST SEEN NEAR {street}',
+  'CONTROL TO UNITS: TARGET VEHICLE NEAR {street}',
+  'ALL UNITS, EYES ON {street}',
+  'REPORT OF SUSPICIOUS VEHICLE AT {street}',
+  'DISPATCH: STAY SHARP AROUND {street}'
+];
+let chatterTimer = 18 + Math.random()*18;
+function speakChatter(text){
+  try{
+    if(Engine.isMuted || !window.speechSynthesis) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.05; u.pitch = 0.7; u.volume = 0.55;
+    window.speechSynthesis.speak(u);
+  } catch(e){ /* speech synthesis is a nice-to-have, never worth erroring over */ }
+}
+function updateChatter(dt){
+  if(gameState !== 'playing' || !suspect){
+    chatterTimer = 18 + Math.random()*18;
+    return;
+  }
+  chatterTimer -= dt;
+  if(chatterTimer <= 0){
+    chatterTimer = 24 + Math.random()*26;
+    const line = CHATTER_LINES[Math.floor(Math.random()*CHATTER_LINES.length)]
+      .replace('{street}', nearestStreetRef(suspect.x, suspect.z));
+    showBanner(line, 2.4);
+    speakChatter(line);
+  }
+}
+
 function updateClubAudio(){
   const levels = {jazz:0, rock:0, dance:0};
   for(const b of buildings){
@@ -5873,6 +5930,7 @@ function frame(t){
   updateLightning(dt);
   updateRain(dt);
   update(dt);
+  updateChatter(dt);
   if(player){
     drawScene();
     drawMinimap();
