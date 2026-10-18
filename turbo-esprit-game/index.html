@@ -180,7 +180,8 @@
           watch the SUSPICION gauge. Ram them at speed or shoot them to
           make the bust before your fuel runs out. Clip a building and
           you'll stall; clip traffic and you'll burn fuel — more for a
-          <b style="color:#6fa8ff">police car</b>.
+          <b style="color:#6fa8ff">police car</b>. Whatever you do,
+          <b style="color:#d9503a">don't hit a dog</b>.
         </p>
         <p>
           <span class="keys">&uarr; / W</span> accelerate&nbsp;&nbsp;
@@ -2875,10 +2876,16 @@ function checkPlayerViolations(dt){
   }
   for(const d of dogPositions()){
     if(dist2(player.x,player.z,d.x,d.z) < 10*10 && Math.abs(player.speed) > 15){
-      triggerWanted('HIT A DOG');
-      player.hazardSlowFloor = Math.abs(player.speed) * 0.3;
-      player.hazardSlowT = 0.3;
-      player.violateCooldown = 2;
+      // deliberately, comedically disproportionate: every other hazard in
+      // this city is survivable, but a dog takes the whole car out
+      if(gameState === 'playing'){
+        gameState = 'over';
+        player.speed = 0;
+        Engine.update(0, 1, false, false);
+        SFX.explosion();
+        shakeTimer = SHAKE_DURATION;
+        showEndPanel('YOU HIT A DOG');
+      }
       return;
     }
   }
