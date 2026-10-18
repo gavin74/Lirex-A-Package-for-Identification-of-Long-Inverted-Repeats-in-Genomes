@@ -371,6 +371,7 @@ const worldHalfZ = (BLOCKS_Z * BLOCK) / 2;
 let buildings = [];   // {x1,x2,z1,z2,h,shade}
 let gasPads = [];     // {x,z,r}
 let donutPads = [];   // same shape as gasPads, recoloured — see spawnDonutBreak
+let garages = [];     // {x,z,doorOpen,entrance} — cars occasionally pull in/out, see updateGarages
 let roadMarks = [];   // {x1,x2,z1,z2} dashed centerline segments
 let stopLines = [];   // {x1,x2,z1,z2} solid stop-line markings, one per approach to a signalled junction
 let walls = [];        // perimeter wall segments, same shape as a building box
@@ -461,6 +462,7 @@ function generateCity(seed){
 
   buildings = [];
   gasPads = [];
+  garages = [];
   let rnd = mulberry32(seed);
   for(let i=0;i<BLOCKS_X;i++){
     for(let j=0;j<BLOCKS_Z;j++){
@@ -497,6 +499,20 @@ function generateCity(seed){
         ]};
         pad.quads = buildStationQuads(pad);
         gasPads.push(pad);
+        continue;
+      }
+      // a small lock-up garage, set back from the south curb like any
+      // other plot — purely cosmetic (see updateGarages): the player
+      // never drives in, but ambient civilian traffic occasionally
+      // "pulls in" (despawns near the closed-then-reopened door) or
+      // "pulls out" (spawns right at the entrance, already on the
+      // correct lane) for the sense of a lived-in street. Same single
+      // south-facing entrance shape the gas station started with, since
+      // nothing here ever needs to be approached from a particular side.
+      const isGarage = !isGas && (i % 5 === 1 && j % 5 === 3 && i>0 && i<BLOCKS_X-1 && j>0 && j<BLOCKS_Z-1);
+      if(isGarage){
+        garages.push({x:cx, z:cz, doorOpen:0,
+          entrance:{axis:'x', line: streetLinesZ[j], cross: cz-streetLinesZ[j], along: cx}});
         continue;
       }
       // one block in ~7 is split into two buildings with a narrow alley
@@ -2329,6 +2345,15 @@ function collideWorld(x, z, r){
     const cx = clamp(x, m.x1, m.x2), cz = clamp(z, m.z1, m.z2);
     if(dist2(x,z,cx,cz) < r*r) return true;
   }
+  // garages sit where a building normally would and look just as solid,
+  // so unlike the gas station canopy (deliberately driveable) they need
+  // the same collision a real building gets — same box collideBuildings
+  // checks, just a fixed half-size since garages don't carry their own
+  // x1/x2/z1/z2 the way a building object does
+  for(const g of garages){
+    const cx = clamp(x, g.x-13, g.x+13), cz = clamp(z, g.z-9, g.z+9);
+    if(dist2(x,z,cx,cz) < r*r) return true;
+  }
   // the old vehicleR was a single circle (r+8) covering every direction
   // equally — fine for a car ahead in the SAME lane, but it also fired
   // the instant you drew level with a car in the NEXT lane over, since
@@ -2862,6 +2887,71 @@ function updateChatter(dt){
       .replace('{street}', nearestStreetRef(suspect.x, suspect.z));
     showBanner(line, 2.4);
     speakChatter(line);
+  }
+}
+
+// cars occasionally pull in/out of a garage — purely cosmetic (the player
+// never drives in), just for the sense of a lived-in street. A new
+// civilian spawns exactly at the garage's own driveway mouth, already on
+// the correct lane of the street it faces (see spawnStreetCar's own
+// "spawns dead-center, eases into lane" easing — same idea, it just
+// starts right at the door instead of an arbitrary random point), which
+// reads as pulling out; "pulling in" just despawns whichever civilian
+// happens to be nearest the door when it opens.
+function spawnCarAtGarage(g){
+  const e = g.entrance;
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const color = CIVILIAN_COLORS[Math.floor(Math.random()*CIVILIAN_COLORS.length)];
+  const c = makeCar(0, 0, 0, color, 80 + Math.random()*25);
+  c.speed = c.maxSpeed;
+  c.type = 'car';
+  c.axis = e.axis; c.dir = dir;
+  c.heading = cardinalHeading(e.axis, dir);
+  c.targetHeading = c.heading;
+  c.lane = correctLane(e.axis, dir, e.line);
+  c.streetCoord = e.line;
+  c.laneOffset = e.cross;
+  if(e.axis === 'z'){ c.z = e.along; c.x = e.line + e.cross; }
+  else { c.x = e.along; c.z = e.line + e.cross; }
+  c.laneHome = e.line + c.lane*LANE_OFFSET;
+  civilians.push(c);
+}
+function despawnCarNearGarage(g){
+  let best = -1, bestD = 30*30;
+  for(let i=0;i<civilians.length;i++){
+    const d = dist2(civilians[i].x, civilians[i].z, g.x, g.z);
+    if(d < bestD){ bestD = d; best = i; }
+  }
+  if(best >= 0) civilians.splice(best, 1);
+}
+let garageTimer = 8 + Math.random()*10;
+function updateGarages(dt){
+  for(const g of garages){
+    if(g.phase === 'opening'){
+      g.doorOpen = Math.min(1, g.doorOpen + dt*1.8);
+      if(g.doorOpen >= 1){
+        g.phase = 'active';
+        g.phaseT = 0.5 + Math.random()*0.4;
+        if(g.pendingSpawn) spawnCarAtGarage(g); else despawnCarNearGarage(g);
+      }
+    } else if(g.phase === 'active'){
+      g.phaseT -= dt;
+      if(g.phaseT <= 0) g.phase = 'closing';
+    } else if(g.phase === 'closing'){
+      g.doorOpen = Math.max(0, g.doorOpen - dt*1.8);
+      if(g.doorOpen <= 0) g.phase = 'idle';
+    }
+  }
+  if(gameState !== 'playing'){ garageTimer = 8 + Math.random()*10; return; }
+  garageTimer -= dt;
+  if(garageTimer <= 0 && garages.length){
+    garageTimer = 10 + Math.random()*14;
+    const idle = garages.filter(g => !g.phase || g.phase === 'idle');
+    if(idle.length){
+      const g = idle[Math.floor(Math.random()*idle.length)];
+      g.phase = 'opening';
+      g.pendingSpawn = Math.random() < 0.6;
+    }
   }
 }
 
@@ -3533,6 +3623,29 @@ function buildStationQuads(pad){
     }
   }
 
+  return quads;
+}
+
+// a small single-car lock-up — a plain box with a dark door recess on
+// the south (street-facing) wall that reads as an open doorway rather
+// than a flat closed panel once g.doorOpen rises (see updateGarages),
+// which is the only visual cue a car pulling in/out gets to sell it.
+function buildGarageQuads(g){
+  const hw = 13, hz = 9, h = 19;
+  const x1 = g.x-hw, x2 = g.x+hw, z1 = g.z-hz, z2 = g.z+hz;
+  const body = 'rgb(198,193,182)', bodyDark = 'rgb(160,156,146)', roof = 'rgb(140,136,128)';
+  const quads = [];
+  quads.push({pts:[[x1,0,z1],[x1,h,z1],[x1,h,z2],[x1,0,z2]], color:bodyDark});
+  quads.push({pts:[[x2,0,z2],[x2,h,z2],[x2,h,z1],[x2,0,z1]], color:bodyDark});
+  quads.push({pts:[[x1,0,z1],[x1,h,z1],[x2,h,z1],[x2,0,z1]], color:body});
+  quads.push({pts:[[x1,h,z1],[x2,h,z1],[x2,h,z2],[x1,h,z2]], color:roof});
+  // the door: a closed door reads as a plain dark grey recess; opening
+  // darkens it further toward black (a shadowy interior) rather than
+  // animating real geometry, which is plenty at this scale/distance
+  const doorW = hw*1.3, doorH = h*0.72;
+  const shade = Math.round(58 - g.doorOpen*40);
+  const doorColor = `rgb(${shade},${shade},${shade+4})`;
+  quads.push({pts:[[g.x-doorW/2,0,z2+0.08],[g.x-doorW/2,doorH,z2+0.08],[g.x+doorW/2,doorH,z2+0.08],[g.x+doorW/2,0,z2+0.08]], color:doorColor});
   return quads;
 }
 
@@ -5439,6 +5552,13 @@ function drawScene(){
       allFaces.push({pts:f.pts, color:f.color, stroke:buildingStroke, width:1.3, depth:faceDepth(f.pts, cam)});
     }
   }
+  for(const g of garages){
+    const d = dist2(cam.x,cam.z,g.x,g.z);
+    if(d > RENDER_DIST*RENDER_DIST) continue;
+    for(const f of buildGarageQuads(g)){
+      allFaces.push({pts:f.pts, color:f.color, stroke:buildingStroke, width:1.3, depth:faceDepth(f.pts, cam)});
+    }
+  }
   if(ROUNDABOUTS_ENABLED){
     for(const rb of roundabouts){
       const d = dist2(cam.x,cam.z,rb.x,rb.z);
@@ -5931,6 +6051,7 @@ function frame(t){
   updateRain(dt);
   update(dt);
   updateChatter(dt);
+  updateGarages(dt);
   if(player){
     drawScene();
     drawMinimap();
