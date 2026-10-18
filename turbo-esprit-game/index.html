@@ -1170,7 +1170,13 @@ function resetGame(){
   }
   civilians = [];
   for(let i=0;i<tCount(32);i++){
-    civilians.push(spawnStreetCar(CIVILIAN_COLORS[Math.floor(Math.random()*CIVILIAN_COLORS.length)], 110));
+    // a small fraction are learner drivers — same car model, just much
+    // slower and marked with L-plates (see buildCarQuads), so weaving
+    // around one at speed is a real, recognizable hazard in traffic
+    const isLearner = Math.random() < 0.08;
+    const c = spawnStreetCar(CIVILIAN_COLORS[Math.floor(Math.random()*CIVILIAN_COLORS.length)], isLearner ? 45 : 110);
+    if(isLearner) c.isLearner = true;
+    civilians.push(c);
   }
   spawnSuspect();
   gameState = 'playing';
@@ -3727,6 +3733,22 @@ function buildCarQuads(car){
     const amber = 'rgb(255,170,20)';
     quads.push({pts:[tw(bx-1.4,5,NOSE+0.4),tw(bx+1.4,5,NOSE+0.4),tw(bx+1.4,6.6,NOSE+0.4),tw(bx-1.4,6.6,NOSE+0.4)], color:amber});
     quads.push({pts:[tw(bx-1.4,5,TAIL-0.4),tw(bx+1.4,5,TAIL-0.4),tw(bx+1.4,6.6,TAIL-0.4),tw(bx-1.4,6.6,TAIL-0.4)], color:amber});
+  }
+
+  // learner plates: a white backing square with a simple red "L" (two
+  // blocky bars — no text rendering in the 3D world, same as every other
+  // decal here), mounted low front and rear. The universal UK cue for a
+  // learner driver, and the only visual tell since the slow speed alone
+  // (see the civilian spawn loop) reads the same as any other pokey car
+  // from a distance.
+  if(car.isLearner){
+    const plateW = 3.4, plateY0 = 1.4, plateY1 = 4.8;
+    for(const z of [NOSE+0.3, TAIL-0.3]){
+      quads.push({pts:[tw(-plateW/2,plateY0,z),tw(plateW/2,plateY0,z),tw(plateW/2,plateY1,z),tw(-plateW/2,plateY1,z)], color:'rgb(245,245,240)'});
+      const red = 'rgb(200,30,30)';
+      quads.push({pts:[tw(-0.9,plateY0+0.4,z),tw(-0.3,plateY0+0.4,z),tw(-0.3,plateY1-0.4,z),tw(-0.9,plateY1-0.4,z)], color:red});
+      quads.push({pts:[tw(-0.9,plateY0+0.4,z),tw(0.5,plateY0+0.4,z),tw(0.5,plateY0+0.9,z),tw(-0.9,plateY0+0.9,z)], color:red});
+    }
   }
 
   return quads;
