@@ -1071,7 +1071,7 @@ function updateBlink(dt){
   if(fastBlinkClock <= 0){ fastBlinkOn = !fastBlinkOn; fastBlinkClock = 0.15; }
 }
 
-let player, suspect, police, ambulances, fireTrucks, dumpTrucks, buses, motorbikes, vans, ebikes, civilians, particles;
+let player, suspect, police, ambulances, fireTrucks, dumpTrucks, buses, motorbikes, vans, ebikes, civilians, particles, streetSweepers;
 let bullets = [];
 let oilSlicks = []; // {x,z,life} — dropped behind the player, spins out anything that drives over it
 const OIL_COOLDOWN = 4, OIL_LIFE = 16, OIL_RADIUS = 13;
@@ -1145,6 +1145,12 @@ function resetGame(){
   dumpTrucks = [];
   for(let i=0;i<tCount(6);i++){
     dumpTrucks.push(spawnStreetCar('#e8b430', 65, 'dumptruck'));
+  }
+  // rare and slow — a real street sweeper trundling along near the curb,
+  // not another fast-moving van
+  streetSweepers = [];
+  for(let i=0;i<tCount(2);i++){
+    streetSweepers.push(spawnStreetCar('#9bc23c', 32, 'streetsweeper'));
   }
   buses = [];
   for(let i=0;i<tCount(6);i++){
@@ -2606,7 +2612,7 @@ function updateStreetCar(car, dt){
 
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
-function allTraffic(){ return [...police, ...ambulances, ...fireTrucks, ...dumpTrucks, ...buses, ...motorbikes, ...vans, ...ebikes, ...civilians]; }
+function allTraffic(){ return [...police, ...ambulances, ...fireTrucks, ...dumpTrucks, ...streetSweepers, ...buses, ...motorbikes, ...vans, ...ebikes, ...civilians]; }
 function allCars(){ return [player, suspect, ...allTraffic()]; }
 
 // Getting too close to any moving traffic costs time and speed — just
@@ -3503,7 +3509,8 @@ function buildBulletQuads(bu){
 const VEHICLE_FOOTPRINT = {
   motorbike:[2.0,11,-11], ebike:[1.4,8,-8], ambulance:[8.5,19,-19],
   firetruck:[9,21,-21], dumptruck:[10.5,15,-27], bus:[9,20,-20],
-  van:[7.8,16,-16], sports:[7.0,17,-14], police:[7.5,15,-15], car:[7.5,15,-15]
+  van:[7.8,16,-16], sports:[7.0,17,-14], police:[7.5,15,-15], car:[7.5,15,-15],
+  streetsweeper:[7.4,15,-17]
 };
 // a soft dark patch of ground under every vehicle — without it cars read
 // as floating a hair above the road instead of sitting on it. A ground
@@ -3644,6 +3651,7 @@ function buildVehicleQuads(car){
   else if(car.type === 'bus') body = buildBusQuads(car);
   else if(car.type === 'police') body = buildPoliceQuads(car);
   else if(car.type === 'van') body = buildVanQuads(car);
+  else if(car.type === 'streetsweeper') body = buildStreetSweeperQuads(car);
   else if(car.type === 'sports') body = buildSportsQuads(car);
   else body = buildCarQuads(car);
   return [...buildVehicleShadow(car), ...buildHeadlightBeam(car), ...buildHeadlightGlow(car), ...buildBrakeGlow(car), ...buildDamageFlames(car), ...body];
@@ -3977,6 +3985,86 @@ function buildVanQuads(car){
     quads.push({pts:[tw(bx-1.5,5,NOSE+0.4),tw(bx+1.5,5,NOSE+0.4),tw(bx+1.5,6.8,NOSE+0.4),tw(bx-1.5,6.8,NOSE+0.4)], color:amber});
     quads.push({pts:[tw(bx-1.5,5,TAIL-0.4),tw(bx+1.5,5,TAIL-0.4),tw(bx+1.5,6.8,TAIL-0.4),tw(bx-1.5,6.8,TAIL-0.4)], color:amber});
   }
+
+  return quads;
+}
+
+// A municipal street sweeper — a van-like cab/body, but with the two
+// details that actually read as "street sweeper" rather than just
+// another van: a diagonal yellow/black chevron hazard stripe across the
+// tailgate, and a pair of spinning gutter brushes low at the front
+// corners (animated off worldTime, not a static decal).
+function buildStreetSweeperQuads(car){
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
+
+  const rgb = carColorRGB(car.color);
+  const body = carShade(rgb, 1.0);
+  const bodyDark = carShade(rgb, 0.8);
+  const bodyLight = carShade(rgb, 1.15);
+  const glass = 'rgb(38,44,52)';
+  const tire = 'rgb(16,16,18)';
+  const headlight = 'rgb(255,248,222)';
+
+  const HW = 7.4, NOSE = 15, TAIL = -17, CB = 3.4, CT = 14;
+  const quads = [];
+  const cB = [tw(-HW,CB,TAIL), tw(HW,CB,TAIL), tw(HW,CB,NOSE), tw(-HW,CB,NOSE)];
+  const cT = [tw(-HW,CT,TAIL), tw(HW,CT,TAIL), tw(HW,CT,NOSE), tw(-HW,CT,NOSE)];
+  quads.push({pts:[cB[0],cT[0],cT[1],cB[1]], color:bodyDark});
+  quads.push({pts:[cB[1],cT[1],cT[2],cB[2]], color:bodyLight});
+  quads.push({pts:[cB[2],cT[2],cT[3],cB[3]], color:body});
+  quads.push({pts:[cB[3],cT[3],cT[0],cB[0]], color:bodyDark});
+  quads.push({pts:[cT[0],cT[1],cT[2],cT[3]], color:bodyLight});
+
+  quads.push({pts:[tw(-HW+1.5,CT-4,NOSE-0.2),tw(HW-1.5,CT-4,NOSE-0.2),tw(HW-1.5,CT-0.5,NOSE-0.2),tw(-HW+1.5,CT-0.5,NOSE-0.2)], color:glass});
+  quads.push(...buildDriverQuads(tw, CT-5, NOSE-3));
+
+  // the chevron: pushed after (so it wins ties with) the plain tail panel
+  // it sits directly on top of, same decal-on-panel convention every
+  // taillight/blinker elsewhere in this file already uses
+  const chevronY0 = CB+1, chevronY1 = CT-5, stripes = 5;
+  for(let i=0;i<stripes;i++){
+    const t0 = i/stripes, t1 = (i+1)/stripes;
+    const xx0 = -HW + t0*HW*2, xx1 = -HW + t1*HW*2;
+    const color = i%2===0 ? 'rgb(232,196,40)' : 'rgb(24,24,26)';
+    quads.push({pts:[tw(xx0,chevronY0,TAIL),tw(xx1,chevronY0,TAIL),tw(xx1+3,chevronY1,TAIL),tw(xx0+3,chevronY1,TAIL)], color});
+  }
+
+  const vChrome = 'rgb(206,209,213)';
+  quads.push({pts:[tw(-HW+0.5,2.8,NOSE+0.9),tw(HW-0.5,2.8,NOSE+0.9),tw(HW-0.5,4.6,NOSE+0.9),tw(-HW+0.5,4.6,NOSE+0.9)], color:vChrome});
+
+  quads.push({pts:[tw(-HW,0,TAIL),tw(-HW+3.2,0,TAIL),tw(-HW+3.2,CB,TAIL),tw(-HW,CB,TAIL)], color:tire});
+  quads.push({pts:[tw(HW-3.2,0,TAIL),tw(HW,0,TAIL),tw(HW,CB,TAIL),tw(HW-3.2,CB,TAIL)], color:tire});
+  quads.push({pts:[tw(-HW+1.3,4.5,NOSE),tw(-4.5,4.5,NOSE),tw(-4.5,6.5,NOSE),tw(-HW+1.3,6.5,NOSE)], color:headlight});
+  quads.push({pts:[tw(4.5,4.5,NOSE),tw(HW-1.3,4.5,NOSE),tw(HW-1.3,6.5,NOSE),tw(4.5,6.5,NOSE)], color:headlight});
+  quads.push({pts:[tw(-HW,0,NOSE),tw(-HW+3.2,0,NOSE),tw(-HW+3.2,CB,NOSE),tw(-HW,CB,NOSE)], color:tire});
+  quads.push({pts:[tw(HW-3.2,0,NOSE),tw(HW,0,NOSE),tw(HW,CB,NOSE),tw(HW-3.2,CB,NOSE)], color:tire});
+
+  // spinning gutter brushes — a dark hub post plus 4 bristle spokes
+  // rotated by worldTime, low at each front corner
+  const brushY = 1.6, brushR = 2.2, bristle = 'rgb(200,160,60)', hub = 'rgb(40,40,42)';
+  for(const side of [-1,1]){
+    const bx = side*(HW+1.5), bz = NOSE-2;
+    quads.push({pts:[tw(bx-0.6,0,bz-0.6),tw(bx+0.6,0,bz-0.6),tw(bx+0.6,brushY*2,bz-0.6),tw(bx-0.6,brushY*2,bz-0.6)], color:hub});
+    const spin = (worldTime*6 + (side>0?0:Math.PI)) % (Math.PI*2);
+    for(let i=0;i<4;i++){
+      const a = spin + i*Math.PI/2;
+      const ex = bx + Math.cos(a)*brushR, ez = bz + Math.sin(a)*brushR;
+      quads.push({pts:[tw(bx,brushY,bz),tw(ex,brushY,ez),tw(ex,0.2,ez),tw(bx,0.2,bz)], color:bristle});
+    }
+  }
+
+  if(blinkOn && car.signal){
+    const bx = (car.signal==='left' ? -1 : 1) * (HW - 1);
+    const amber = 'rgb(255,170,20)';
+    quads.push({pts:[tw(bx-1.5,5,NOSE+0.4),tw(bx+1.5,5,NOSE+0.4),tw(bx+1.5,6.8,NOSE+0.4),tw(bx-1.5,6.8,NOSE+0.4)], color:amber});
+  }
+
+  // roof-mounted amber beacon, same fast-blink flag the police light bar
+  // already uses — the classic utility-vehicle warning light
+  const beaconColor = fastBlinkOn ? 'rgb(255,180,30)' : 'rgb(110,70,10)';
+  quads.push({pts:[tw(-2,CT,0),tw(2,CT,0),tw(2,CT+1.6,0),tw(-2,CT+1.6,0)], color:beaconColor});
+  quads.push({pts:[tw(0,CT,-2),tw(0,CT,2),tw(0,CT+1.6,2),tw(0,CT+1.6,-2)], color:beaconColor});
 
   return quads;
 }
@@ -5779,6 +5867,7 @@ police = [spawnStreetCar('#6fa8ff', 90, 'police')];
 ambulances = [spawnStreetCar('#f0f0e6', 85, 'ambulance')];
 fireTrucks = [spawnStreetCar('#c42822', 100, 'firetruck')];
 dumpTrucks = [spawnStreetCar('#e8b430', 65, 'dumptruck')];
+streetSweepers = [spawnStreetCar('#9bc23c', 32, 'streetsweeper')];
 buses = [spawnStreetCar('#b0221e', 75, 'bus')];
 motorbikes = [spawnStreetCar('#ff6a3d', 180, 'motorbike')];
 vans = [spawnStreetCar('#9aa08f', 80, 'van')];
