@@ -1174,6 +1174,7 @@ function spawnPlayerStart(){
   car.x = x + LANE_OFFSET;
   car.y = 0; car.vy = 0; car.airborne = false;
   car.carPark = null; car.carParkLastDepth = -Infinity;
+  car.hazardSlowT = 0; car.hazardSlowFloor = 0;
   return car;
 }
 
@@ -2214,6 +2215,20 @@ function updatePlayer(dt){
   const spinningOut = checkOilSlick(player, dt);
   player.braking = !!brake;
 
+  // clipping traffic/police used to cut speed by 70% in a single frame —
+  // correct final value, but arriving there in 1/60th of a second read as
+  // the car hitting an invisible wall rather than a glancing sideswipe.
+  // Bleed it off at a brisk, bounded rate instead (see where hazardSlowT
+  // gets set, in updateHazards) and let normal accel/brake keep working
+  // alongside it, same as the oil-slick spin-out already does.
+  if(player.hazardSlowT > 0){
+    player.hazardSlowT -= dt;
+    if(Math.abs(player.speed) > player.hazardSlowFloor){
+      player.speed -= Math.sign(player.speed) * 260 * dt;
+      if(Math.abs(player.speed) < player.hazardSlowFloor) player.speed = Math.sign(player.speed) * player.hazardSlowFloor;
+    }
+  }
+
   if(spinningOut) player.speed -= Math.sign(player.speed)*140*dt; // skids to a stop, deaf to throttle/brake
   else if(accel){
     // a flat acceleration rate regardless of speed read as smooth/lifeless
@@ -3217,7 +3232,11 @@ function update(dt){
     }
     if(hit){
       fuel = clamp(fuel - hit.penalty, 0, 100);
-      player.speed *= 0.3;
+      // bleed down to the same 30%-of-impact-speed floor as before, just
+      // over a few frames instead of one (see the hazardSlowT block near
+      // the top of updatePlayer)
+      player.hazardSlowFloor = Math.abs(player.speed) * 0.3;
+      player.hazardSlowT = 0.3;
       showBanner(hit.label+'! -'+hit.penalty+' FUEL', 0.9);
       player.hazardCooldown = HAZARD_COOLDOWN;
       SFX.crash();
