@@ -300,6 +300,17 @@ const HAZARD_COOLDOWN = 1.0;       // min seconds between hazard penalties, so l
 // hops, flooring it launches a real jump)
 const GRAVITY = 42;
 const RAMP_VY_MIN = 9, RAMP_VY_MAX = 30;
+// the multi-story car park: one signature structure, reached like a gas
+// station pull-in (Q/E off the correct side of its street), then a single
+// committed drive-through along the SAME axis you entered on — flat entry,
+// a ramp climbing to an open-top upper deck past parked cars, then a hard
+// launch off the far edge that reuses this exact same hop/gravity physics,
+// just a bigger runway and a harder kick, landing back on the street below.
+const CP_FLOOR_H = 34;             // upper deck height above street level
+const CP_GROUND_END = 50;          // flat ground-floor entry, depth 0..this
+const CP_RAMP_END = 120;           // ramp climbs 0->CP_FLOOR_H over this span
+const CP_DECK_END = 190;           // flat upper deck; crossing this launches you
+const CP_LAUNCH_VY_MIN = 16, CP_LAUNCH_VY_MAX = 46;
 const LANE_OFFSET = 16;            // distance of each lane from the street centerline
 const LANE_SPEED = 70;             // lateral units/sec when changing lanes
 const TURN_RATE = 3.6;             // rad/sec every car's visual heading animates at —
@@ -478,6 +489,21 @@ function generateCity(seed){
   buildings = [];
   gasPads = [];
   garages = [];
+  // one signature multi-story car park, fixed at the same block every
+  // game rather than scattered procedurally — a landmark, not street
+  // furniture. South-facing off its street like a small garage, placed
+  // near the west edge of its block so the whole committed drive-through
+  // (CP_DECK_END-ish units) fits inside that one block without needing to
+  // suppress more than the single cell it replaces.
+  {
+    const cpI = 7, cpJ = 8;
+    const cpX1 = streetLinesX[cpI] + roadHalfX[cpI];
+    carParkPad = {
+      dir: 1,
+      entrance: {axis:'x', line: streetLinesZ[cpJ], cross: 50, along: cpX1 + 20}
+    };
+    carParkPad.quads = buildCarParkQuads(carParkPad);
+  }
   let rnd = mulberry32(seed);
   for(let i=0;i<BLOCKS_X;i++){
     for(let j=0;j<BLOCKS_Z;j++){
@@ -489,6 +515,10 @@ function generateCity(seed){
       const z1 = streetLinesZ[j] + roadHalfZ[j], z2 = streetLinesZ[j+1] - roadHalfZ[j+1];
       const cx = (x1+x2)/2, cz = (z1+z2)/2;
       const cellHalfX = (x2-x1)/2, cellHalfZ = (z2-z1)/2;
+      // the car park's own cell: no building here, it's built separately
+      // above (see carParkPad) since its footprint is a long committed
+      // drive-through rather than a single lot-sized structure
+      if(i===7 && j===8) continue;
       const isGas = (i % 4 === 2 && j % 4 === 2);
       if(isGas){
         // a gas station sits where a building normally would — set back
@@ -1109,6 +1139,7 @@ const OIL_COOLDOWN = 4, OIL_LIFE = 16, OIL_RADIUS = 13;
 const CIVILIAN_COLORS = ['#b9bdb2', '#8a9bb0', '#a98f6e', '#8f8f94', '#9bb08a', '#b08a8a'];
 let score, caught, fuel, gameState, roundLevel, damage;
 let suspectSuspicion = 0;
+let carParkPad = null;
 let lastSuspectSpawnGuardTimer = 0;
 let bannerTimer = 0;
 const SHAKE_DURATION = 0.3;
@@ -1142,6 +1173,7 @@ function spawnPlayerStart(){
   car.laneOffset = LANE_OFFSET;
   car.x = x + LANE_OFFSET;
   car.y = 0; car.vy = 0; car.airborne = false;
+  car.carPark = null; car.carParkLastDepth = -Infinity;
   return car;
 }
 
@@ -2070,15 +2102,51 @@ function nearbyGasPad(side){
   return null;
 }
 
+// the car park's entrance works the same way a gas pad's does (pull in
+// off the correct side of its street), but it's a single fixed structure
+// built facing one direction, not a per-pad list — so it only bites while
+// you're driving the one way it was built to be entered from.
+function nearbyCarPark(side){
+  if(!carParkPad) return null;
+  const ent = carParkPad.entrance;
+  if(ent.axis !== player.axis || player.dir !== carParkPad.dir) return null;
+  if(Math.abs(player.streetCoord - ent.line) > 0.5) return null;
+  const forward = player.axis==='z' ? player.z : player.x;
+  if(Math.abs(forward - ent.along) > 40) return null;
+  const rightSign = player.dir * (player.axis==='z' ? 1 : -1);
+  const padSide = Math.sign(ent.cross) === rightSign ? 'right' : 'left';
+  return padSide === side ? carParkPad : null;
+}
+
 // Q/E queue a turn at the next junction by default, but a gas station
 // right alongside takes priority — there's no junction to turn at there
 // (see the pad.laneAxis/laneCross comment in generateCity), so pressing
 // toward it instead toggles a direct pull-in/pull-out steer (updatePlayer).
 function queueTurn(side){
   if(gameState!=='playing' || !player) return;
+  if(player.carPark){
+    // once you're on the ramp there's no three-point turn back out — only
+    // the flat entry apron (depth < CP_GROUND_END) lets you abort; past
+    // that you're committed to the climb and the launch at the far end
+    const ent = player.carPark.entrance;
+    const forward = ent.axis==='z' ? player.z : player.x;
+    const depth = (forward - ent.along) * player.dir;
+    if(depth < CP_GROUND_END){
+      player.carPark = null;
+      setSignal(player, side, 2.5);
+    }
+    return;
+  }
   if(player.parkPad){
     // already pulled in — either side pulls back out onto the street
     player.parkPad = null;
+    setSignal(player, side, 2.5);
+    return;
+  }
+  const cpHit = nearbyCarPark(side);
+  if(cpHit){
+    player.carPark = cpHit;
+    player.carParkLastDepth = -Infinity;
     setSignal(player, side, 2.5);
     return;
   }
@@ -2188,15 +2256,17 @@ function updatePlayer(dt){
   // collision circle with no way to move forward again (only reversing
   // escaped it, which read as the car just freezing at a junction)
   player.laneHome = player.streetCoord + player.lane * LANE_OFFSET;
-  const avoid = player.parkPad ? 0 : obstacleAvoidOffset(player);
+  const avoid = (player.parkPad || player.carPark) ? 0 : obstacleAvoidOffset(player);
 
   // ease toward the target lane (exponential approach, fast at first and
   // slowing into place) rather than a constant-speed slide that just snaps
   // the instant it arrives — reads as a much smoother lane change. Pulled
-  // into a gas station (player.parkPad), the same easing steers toward
-  // the pad's cross-position instead of a normal lane slot — see
-  // nearbyGasPad()/queueTurn().
-  const targetOffset = player.parkPad ? player.parkPad.cross : (player.lane * LANE_OFFSET + avoid);
+  // into a gas station (player.parkPad) or the car park (player.carPark),
+  // the same easing steers toward a fixed cross-position instead of a
+  // normal lane slot — see nearbyGasPad()/nearbyCarPark()/queueTurn().
+  const targetOffset = player.parkPad ? player.parkPad.cross
+    : player.carPark ? player.carPark.entrance.cross
+    : (player.lane * LANE_OFFSET + avoid);
   const prevLaneOffset = player.laneOffset;
   const laneEase = 1 - Math.exp(-LANE_SPEED/LANE_OFFSET*dt);
   player.laneOffset += (targetOffset - player.laneOffset) * laneEase;
@@ -2268,6 +2338,31 @@ function updatePlayer(dt){
     }
   }
 
+  // the car park ramp/deck: height is driven by how far into the structure
+  // you've driven (depth), not by a jump impulse — only the launch off the
+  // far edge of the deck uses the same ballistic hop the roadworks ramps
+  // do, with a bigger kick since there's a whole floor's height to fall
+  // back from. Depth-crossing is checked the same single-shot way the
+  // roadworks midpoint is, via the last depth sampled a frame ago.
+  if(player.carPark && !player.airborne){
+    const ent = player.carPark.entrance;
+    const forward = ent.axis==='z' ? nz : nx;
+    const depth = (forward - ent.along) * player.dir;
+    if(depth < CP_RAMP_END){
+      const t = clamp((depth-CP_GROUND_END)/(CP_RAMP_END-CP_GROUND_END), 0, 1);
+      player.y = CP_FLOOR_H * t;
+    } else if(depth < CP_DECK_END){
+      player.y = CP_FLOOR_H;
+    }
+    if(player.carParkLastDepth < CP_DECK_END && depth >= CP_DECK_END){
+      const speedFrac = clamp(Math.abs(player.speed)/player.maxSpeed, 0, 1);
+      player.vy = CP_LAUNCH_VY_MIN + (CP_LAUNCH_VY_MAX-CP_LAUNCH_VY_MIN)*speedFrac;
+      player.airborne = true;
+      showBanner('AIRTIME!', 0.9);
+    }
+    player.carParkLastDepth = depth;
+  }
+
   const CAR_R = 9;
 
   // axis-separated collision so the car slides along walls instead of
@@ -2294,6 +2389,7 @@ function updatePlayer(dt){
     player.vy -= GRAVITY*dt;
     if(player.y <= 0){
       player.y = 0; player.vy = 0; player.airborne = false;
+      if(player.carPark) player.carPark = null; // landed clear of the structure
       shakeTimer = Math.max(shakeTimer, SHAKE_DURATION*0.5);
       SFX.screech();
     }
@@ -3678,6 +3774,86 @@ function buildGarageQuads(g){
   const shade = Math.round(58 - g.doorOpen*40);
   const doorColor = `rgb(${shade},${shade},${shade+4})`;
   quads.push({pts:[[g.x-doorW/2,0,z2+0.08],[g.x-doorW/2,doorH,z2+0.08],[g.x+doorW/2,doorH,z2+0.08],[g.x+doorW/2,0,z2+0.08]], color:doorColor});
+  return quads;
+}
+
+// the multi-story car park's static shell: a sloped ramp, an open-top
+// upper deck, guard rails marking both edges, a few support pillars, and
+// parked-car silhouettes for flavor. Built once in generateCity and cached
+// on the pad (carParkPad.quads) like a gas station's forecourt, not rebuilt
+// every frame — nothing here animates. Every prop is kept outside the
+// single fixed lane (|lateral| <= HW) the player's locked steering always
+// follows while player.carPark is set, so none of it needs real collision:
+// the drive-through is collision-free by construction, same as a roadworks
+// ramp is just a ground marking, not an obstacle.
+function buildCarParkQuads(pad){
+  const ent = pad.entrance;
+  const axis = ent.axis;
+  const cz = ent.line + ent.cross;   // corridor centerline (perpendicular to travel)
+  const base = ent.along;            // corridor start, in the travel direction
+  const HW = 13;                     // half-width of the single drive lane
+  function pt(depth, lateral, y){
+    const along = base + depth;
+    return axis==='x' ? [along, y, cz+lateral] : [cz+lateral, y, along];
+  }
+  const quads = [];
+  function pushBox(d0, d1, l0, l1, y0, y1, colorTop, colorSide){
+    quads.push({pts:[pt(d0,l0,y0),pt(d0,l0,y1),pt(d1,l0,y1),pt(d1,l0,y0)], color:colorSide});
+    quads.push({pts:[pt(d1,l1,y0),pt(d1,l1,y1),pt(d0,l1,y1),pt(d0,l1,y0)], color:colorSide});
+    quads.push({pts:[pt(d0,l1,y0),pt(d0,l1,y1),pt(d0,l0,y1),pt(d0,l0,y0)], color:colorSide});
+    quads.push({pts:[pt(d1,l0,y0),pt(d1,l0,y1),pt(d1,l1,y1),pt(d1,l1,y0)], color:colorSide});
+    quads.push({pts:[pt(d0,l0,y1),pt(d1,l0,y1),pt(d1,l1,y1),pt(d0,l1,y1)], color:colorTop});
+  }
+
+  const deckColor = 'rgb(150,148,150)', deckEdge = 'rgb(108,106,110)';
+  const railColor = 'rgb(214,182,74)', pillarColor = 'rgb(126,124,128)';
+  const lipColor = 'rgb(226,80,54)';
+
+  // the ramp: a sloped road surface, plus two side fascia panels so it
+  // doesn't read as a floating slab
+  quads.push({pts:[pt(CP_GROUND_END,-HW,0),pt(CP_GROUND_END,HW,0),pt(CP_RAMP_END,HW,CP_FLOOR_H),pt(CP_RAMP_END,-HW,CP_FLOOR_H)], color:deckColor});
+  quads.push({pts:[pt(CP_GROUND_END,-HW,0),pt(CP_RAMP_END,-HW,CP_FLOOR_H),pt(CP_RAMP_END,-HW,0)], color:deckEdge});
+  quads.push({pts:[pt(CP_GROUND_END,HW,0),pt(CP_RAMP_END,HW,0),pt(CP_RAMP_END,HW,CP_FLOOR_H)], color:deckEdge});
+
+  // the open-top upper deck, plus a short bright lip right at the launch
+  // edge marking where the climb ends and the jump begins
+  quads.push({pts:[pt(CP_RAMP_END,-HW,CP_FLOOR_H),pt(CP_RAMP_END,HW,CP_FLOOR_H),pt(CP_DECK_END,HW,CP_FLOOR_H),pt(CP_DECK_END,-HW,CP_FLOOR_H)], color:deckColor});
+  quads.push({pts:[pt(CP_DECK_END,-HW,CP_FLOOR_H),pt(CP_DECK_END,HW,CP_FLOOR_H),pt(CP_DECK_END+6,HW,CP_FLOOR_H),pt(CP_DECK_END+6,-HW,CP_FLOOR_H)], color:lipColor});
+
+  // guard rails along both edges, following the ramp's slope then running
+  // flat across the deck — a real low barrier wall, not just a stripe
+  const RAILH = 8;
+  for(const side of [-1,1]){
+    quads.push({pts:[pt(CP_GROUND_END,side*HW,0),pt(CP_RAMP_END,side*HW,CP_FLOOR_H),pt(CP_RAMP_END,side*HW,CP_FLOOR_H+RAILH),pt(CP_GROUND_END,side*HW,RAILH)], color:railColor});
+    quads.push({pts:[pt(CP_RAMP_END,side*HW,CP_FLOOR_H),pt(CP_DECK_END,side*HW,CP_FLOOR_H),pt(CP_DECK_END,side*HW,CP_FLOOR_H+RAILH),pt(CP_RAMP_END,side*HW,CP_FLOOR_H+RAILH)], color:railColor});
+  }
+
+  // support pillars holding the deck up, just outside the lane so they're
+  // never in the player's way
+  const pillarN = 3;
+  for(let k=1;k<=pillarN;k++){
+    const d = CP_RAMP_END + (CP_DECK_END-CP_RAMP_END)*k/(pillarN+1);
+    for(const side of [-1,1]){
+      const l = side*(HW+3);
+      pushBox(d-2, d+2, l-2, l+2, 0, CP_FLOOR_H, pillarColor, pillarColor);
+    }
+  }
+
+  // parked-car silhouettes, ground floor and deck alike — pure flavor,
+  // kept well clear of the lane (see the function comment: nothing here
+  // needs collision because nothing here is ever in the player's path)
+  const carColors = ['#b9bdb2','#8a9bb0','#a98f6e','#8f8f94','#9bb08a','#b08a8a'];
+  function parkedCar(depth, side, idx){
+    const rgb = carColorRGB(carColors[idx % carColors.length]);
+    const top = `rgb(${rgb.join(',')})`;
+    const sideColor = `rgb(${rgb.map(c=>Math.round(c*0.72)).join(',')})`;
+    const l = side*(HW+10);
+    pushBox(depth-8, depth+8, l-4.5, l+4.5, 0.2, 5.5, top, sideColor);
+  }
+  let ci = 0;
+  for(const depth of [16, 34]) for(const side of [-1,1]) parkedCar(depth, side, ci++);
+  for(const depth of [CP_RAMP_END+16, CP_RAMP_END+38, CP_RAMP_END+60]) for(const side of [-1,1]) parkedCar(depth, side, ci++);
+
   return quads;
 }
 
@@ -5591,6 +5767,18 @@ function drawScene(){
       allFaces.push({pts:f.pts, color:f.color, stroke:buildingStroke, width:1.3, depth:faceDepth(f.pts, cam)});
     }
   }
+  if(carParkPad){
+    const ent = carParkPad.entrance;
+    const mid = CP_DECK_END/2;
+    const cpx = ent.axis==='x' ? ent.along+mid : ent.line+ent.cross;
+    const cpz = ent.axis==='x' ? ent.line+ent.cross : ent.along+mid;
+    const d = dist2(cam.x,cam.z,cpx,cpz);
+    if(d <= RENDER_DIST*RENDER_DIST*4){ // a big structure, kept visible a bit past normal RENDER_DIST
+      for(const f of carParkPad.quads){
+        allFaces.push({pts:f.pts, color:f.color, stroke:buildingStroke, width:1.3, depth:faceDepth(f.pts, cam)});
+      }
+    }
+  }
   if(ROUNDABOUTS_ENABLED){
     for(const rb of roundabouts){
       const d = dist2(cam.x,cam.z,rb.x,rb.z);
@@ -5922,6 +6110,16 @@ function drawMinimap(){
   mctx.fillStyle = 'rgba(235,165,195,0.7)';
   for(const pad of donutPads){
     mctx.fillRect(ox+(pad.x-30)*scale, oz-(pad.z+20)*scale, 60*scale, 40*scale);
+  }
+  if(carParkPad){
+    const ent = carParkPad.entrance;
+    const mid = CP_DECK_END/2;
+    const cpx = ent.axis==='x' ? ent.along+mid : ent.line+ent.cross;
+    const cpz = ent.axis==='x' ? ent.line+ent.cross : ent.along+mid;
+    const longSpan = (CP_DECK_END+20)*scale, narrowSpan = 28*scale;
+    mctx.fillStyle = 'rgba(214,182,74,0.8)';
+    if(ent.axis==='x') mctx.fillRect(ox+(cpx-mid-10)*scale, oz-(cpz+14)*scale, longSpan, narrowSpan);
+    else mctx.fillRect(ox+(cpx-14)*scale, oz-(cpz+mid+10)*scale, narrowSpan, longSpan);
   }
   mctx.strokeStyle = 'rgba(200,215,190,0.8)';
   for(const rb of roundabouts){
