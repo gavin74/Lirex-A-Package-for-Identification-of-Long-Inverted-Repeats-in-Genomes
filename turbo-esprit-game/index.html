@@ -94,6 +94,8 @@
   #hudSide{display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
   #damageBar{width:100%;height:5px;background:rgba(255,255,255,.08);margin:-3px 0 2px;border-radius:2px;overflow:hidden}
   #damageBarFill{height:100%;width:0%;background:var(--good);transition:width .2s,background .2s}
+  #suspicionBar{width:100%;height:5px;background:rgba(255,255,255,.08);margin:-3px 0 2px;border-radius:2px;overflow:hidden}
+  #suspicionBarFill{height:100%;width:0%;background:var(--good);transition:width .15s,background .15s}
 
   #banner{
     position:absolute;left:50%;top:38%;transform:translate(-50%,-50%);
@@ -160,6 +162,8 @@
       <div class="row"><span class="label">CAUGHT</span><span id="hudCaught">0</span></div>
       <div class="row"><span class="label">DAMAGE</span><span id="hudDamage">0%</span></div>
       <div id="damageBar"><div id="damageBarFill"></div></div>
+      <div class="row"><span class="label">SUSPICION</span><span id="hudSuspicion">0%</span></div>
+      <div id="suspicionBar"><div id="suspicionBarFill"></div></div>
       <div class="row"><span class="label">SOUND (M)</span><span id="hudSound" class="clickable">ON</span></div>
     </div>
   </div>
@@ -170,11 +174,13 @@
         <h2>a tribute to Turbo Esprit (ZX Spectrum, 1986)</h2>
         <p>
           Tail the amber <b>suspect car</b> through the walled city.
-          Get close before they clock you and they'll bolt — once
-          spotted they're faster, so close in quietly. Ram them at speed
-          or shoot them to make the bust before your fuel runs out. Clip a
-          building and you'll stall; clip traffic and you'll burn
-          fuel — more for a <b style="color:#6fa8ff">police car</b>.
+          Sit close behind them and their suspicion builds — ease in at
+          their own pace and you can get close quietly, but close in hot
+          and they'll clock you fast. Once spotted they're faster, so
+          watch the SUSPICION gauge. Ram them at speed or shoot them to
+          make the bust before your fuel runs out. Clip a building and
+          you'll stall; clip traffic and you'll burn fuel — more for a
+          <b style="color:#6fa8ff">police car</b>.
         </p>
         <p>
           <span class="keys">&uarr; / W</span> accelerate&nbsp;&nbsp;
@@ -275,8 +281,17 @@ const CATCH_RADIUS = 24;
 const CATCH_BONUS_FUEL = 20;       // fuel does the job a time bonus used to — the run is
                                     // only ever ended by running dry, not a clock
 const START_FUEL = 100;
-const SPOT_RADIUS = 170;           // how close before the suspect notices you and bolts
+const SPOT_RADIUS = 170;           // how close before the suspect can notice you at all
 const FLEE_SPEED_MULT = 1.25;      // speed boost once the suspect is fleeing
+// Being within SPOT_RADIUS doesn't spot you instantly — suspicion builds
+// the closer and longer you sit there, and bleeds off again if you back
+// out of range. Closing in hot (faster than the suspect) builds it much
+// quicker than easing in at a matched, quiet speed, so hanging back and
+// creeping up is the way to get close without triggering the bolt.
+const SUSPICION_RANGE = SPOT_RADIUS;
+const SUSPICION_RATE = 0.8;        // suspicion/sec at point-blank range, matched speed
+const SUSPICION_RATE_FAST = 1.7;   // suspicion/sec at point-blank range, closing faster than them
+const SUSPICION_DECAY = 0.9;       // suspicion/sec drained once you're back outside SUSPICION_RANGE
 const HAZARD_COOLDOWN = 1.0;       // min seconds between hazard penalties, so lingering near
                                     // one doesn't reapply the penalty every single frame
 // roadworks-ramp jump physics — a simple vertical hop, not real rigid-body
@@ -1093,6 +1108,7 @@ let oilSlicks = []; // {x,z,life} — dropped behind the player, spins out anyth
 const OIL_COOLDOWN = 4, OIL_LIFE = 16, OIL_RADIUS = 13;
 const CIVILIAN_COLORS = ['#b9bdb2', '#8a9bb0', '#a98f6e', '#8f8f94', '#9bb08a', '#b08a8a'];
 let score, caught, fuel, gameState, roundLevel, damage;
+let suspectSuspicion = 0;
 let lastSuspectSpawnGuardTimer = 0;
 let bannerTimer = 0;
 const SHAKE_DURATION = 0.3;
@@ -1142,6 +1158,7 @@ function resetGame(){
   SFX.sirenStop();
   player.violateCooldown = 0;
   suspect = null;
+  suspectSuspicion = 0;
   // the ambient traffic pools (everything but emergency services) scale
   // with the TRAFFIC slider on the start screen — police/ambulance/fire
   // stay fixed since they're tied to game balance, not street-filling
@@ -1268,6 +1285,7 @@ function spawnSuspect(){
   roundLevel++;
   suspect = spawnStreetCar('#e8b23a', 118 + roundLevel*7, 'sports');
   suspect.fleeing = false;
+  suspectSuspicion = 0;
   suspect.darkWindows = true; // the suspect reads as more sinister with near-black glass
   // keep it away from the player a bit
   let tries = 0;
@@ -3111,11 +3129,25 @@ function update(dt){
   }
 
   // Turbo Esprit didn't let you just barrel into the suspect from the
-  // start — you tailed them until they noticed you, then they ran.
-  if(!suspect.fleeing && dist2(player.x,player.z,suspect.x,suspect.z) < SPOT_RADIUS*SPOT_RADIUS){
-    suspect.fleeing = true;
-    suspect.speed *= FLEE_SPEED_MULT;
-    showBanner('SPOTTED! PURSUIT!', 1.1);
+  // start — you tailed them until they noticed you, then they ran. Make
+  // that gradual rather than a hard tripwire: suspicion builds the closer
+  // (and the hotter) you close in, and drains off again once you back out
+  // of range, so creeping up slow and quiet buys more time than it used to.
+  if(!suspect.fleeing){
+    const d2 = dist2(player.x,player.z,suspect.x,suspect.z);
+    if(d2 < SUSPICION_RANGE*SUSPICION_RANGE){
+      const proximity = 1 - Math.sqrt(d2)/SUSPICION_RANGE;
+      const closingHot = player.speed > suspect.speed + 15;
+      suspectSuspicion += proximity * (closingHot ? SUSPICION_RATE_FAST : SUSPICION_RATE) * dt;
+      if(suspectSuspicion >= 1){
+        suspectSuspicion = 1;
+        suspect.fleeing = true;
+        suspect.speed *= FLEE_SPEED_MULT;
+        showBanner('SPOTTED! PURSUIT!', 1.1);
+      }
+    } else {
+      suspectSuspicion = Math.max(0, suspectSuspicion - SUSPICION_DECAY*dt);
+    }
   }
 
   if(dist2(player.x,player.z,suspect.x,suspect.z) < CATCH_RADIUS*CATCH_RADIUS
@@ -6063,6 +6095,18 @@ function updateHUD(){
   const dmgFill = document.getElementById('damageBarFill');
   dmgFill.style.width = damage + '%';
   dmgFill.style.background = damage < 50 ? 'var(--good)' : damage < 80 ? '#d9a53a' : '#d9503a';
+  const suspFill = document.getElementById('suspicionBarFill');
+  const suspText = document.getElementById('hudSuspicion');
+  if(suspect && suspect.fleeing){
+    suspText.textContent = 'SPOTTED';
+    suspFill.style.width = '100%';
+    suspFill.style.background = '#d9503a';
+  } else {
+    const sp = Math.round(suspectSuspicion*100);
+    suspText.textContent = sp + '%';
+    suspFill.style.width = sp + '%';
+    suspFill.style.background = sp < 40 ? 'var(--good)' : sp < 75 ? '#d9a53a' : '#d9503a';
+  }
   // dashboard turn-signal indicators — same blinkOn clock the car's own
   // signal lights already blink on, just mirrored onto the HUD
   document.getElementById('blinkerL').classList.toggle('lit', blinkOn && player.signal==='left');
