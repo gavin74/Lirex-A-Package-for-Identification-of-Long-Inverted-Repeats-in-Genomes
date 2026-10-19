@@ -351,6 +351,13 @@ const JUNCTION_WINDOW = 14;
 // up with where a real driver actually starts turning: right as their
 // front wheels reach the junction, not their whole body.
 const CAR_FRONT_OFFSET = 9;
+// the turn radius for the player's corner arc (see turnPlayer/player.arcTurn
+// below) — real cars sweep a continuous curve through a junction, heading
+// and position changing together, instead of snapping onto the new street
+// and pivoting on the spot. Small enough to read as a tight city-street
+// turn, bigger than LANE_OFFSET so the lane change reads as part of the
+// same sweep rather than a separate slide tacked onto the end of it.
+const CORNER_RADIUS = 20;
 const FUEL_ENABLED = true;         // gas stations now actually matter — find one before the tank runs dry
 const ROUNDABOUTS_ENABLED = true;  // experimental, flag-gated per request — a small
                                     // collidable island the player must steer around
@@ -2258,23 +2265,25 @@ function correctLane(axis, dir, line){
   return DRIVE_SIDE === 'right' ? rightHand : -rightHand;
 }
 
+// Arms a continuous corner arc instead of snapping the car onto the new
+// street immediately. The car's heading and position both keep evolving
+// every frame from wherever it actually is right now (see the player.arcTurn
+// branch in updatePlayer) -- no teleport, no in-place pivot. axis/dir/
+// lane/streetCoord (and the old instant-reassignment this function used to
+// do) are deferred until the arc finishes, since they only make sense once
+// the car is actually established on the new street.
 function turnPlayer(side){
   const idx = cardinalIndex(player.axis, player.dir);
   const next = CARDINALS[side==='right' ? (idx+1)%4 : (idx+3)%4];
   const lines = player.axis==='z' ? streetLinesZ : streetLinesX;
   const forward = player.axis==='z' ? player.z : player.x;
-  player.streetCoord = nearestStreet(lines, forward);
-  player.axis = next.axis;
-  player.dir = next.dir;
-  player.targetHeading = cardinalHeading(next.axis, next.dir);
-  player.lane = correctLane(next.axis, next.dir, player.streetCoord);
-  // see where this is read, near the median collision check in
-  // updatePlayer: the heading swing finishes well before the sideways
-  // glide into the new lane does, so a plain turningNow check (gone false
-  // the moment heading catches up) still leaves the car mid-slide across
-  // this street's own median for a stretch afterward. A flat timer covers
-  // the whole settle, however long the lane easing actually takes.
-  player.turnSettleT = 1.2;
+  const nextStreetCoord = nearestStreet(lines, forward);
+  const nextLane = correctLane(next.axis, next.dir, nextStreetCoord);
+  player.arcTurn = {
+    turnSign: side==='right' ? 1 : -1, // heading increases turning right, decreases turning left (see cardinalHeading)
+    sweep: 0, // radians swept so far; the arc is done at exactly PI/2
+    nextAxis: next.axis, nextDir: next.dir, nextLane, nextStreetCoord
+  };
 }
 
 // checked every frame while a turn is armed: fires the turn the moment
@@ -2282,6 +2291,12 @@ function turnPlayer(side){
 // or imprecisely Q/E was pressed
 function updatePendingTurn(){
   if(!player.pendingTurn) return;
+  // a second Q/E tap mid-arc still queues (player.pendingTurn stays set,
+  // handled next frame once the current arc finishes) -- it just can't
+  // fire yet: player.axis/dir still describe the street being left, not
+  // the one the car is actually on, so the junction check below would be
+  // testing the wrong line entirely.
+  if(player.arcTurn) return;
   const forward = player.axis==='z' ? player.z : player.x;
   const noseForward = forward + player.dir * CAR_FRONT_OFFSET;
   const lines = player.axis==='z' ? streetLinesZ : streetLinesX;
@@ -2332,7 +2347,10 @@ function updatePlayer(dt){
   if(Math.abs(player.speed) < 2 && !accel && !brake) player.speed = 0;
 
   updatePendingTurn();
-  approachHeading(player, dt, TURN_RATE);
+  // while a corner arc is active, heading is driven directly by the arc
+  // integration below (see player.arcTurn), not eased toward a separate
+  // target -- calling this too would just fight it every frame.
+  if(!player.arcTurn) approachHeading(player, dt, TURN_RATE);
 
   // the chase camera trails the car's own heading by a beat instead of
   // pivoting in perfect lockstep with it (drawScene reads this instead of
@@ -2361,20 +2379,27 @@ function updatePlayer(dt){
   // into a gas station (player.parkPad) or the car park (player.carPark),
   // the same easing steers toward a fixed cross-position instead of a
   // normal lane slot — see nearbyGasPad()/nearbyCarPark()/queueTurn().
-  const targetOffset = player.parkPad ? player.parkPad.cross
-    : player.carPark ? player.carPark.entrance.cross
-    : (player.lane * LANE_OFFSET + avoid);
+  // a corner arc drives the lateral position directly (see player.arcTurn
+  // below), so the lane easing that normally slides the car to its target
+  // lane sits out while one is in progress -- it resumes once the arc
+  // finishes and the car has a normal straight-line lane to ease into.
   const prevLaneOffset = player.laneOffset;
-  const laneEase = 1 - Math.exp(-LANE_SPEED/LANE_OFFSET*dt);
-  player.laneOffset += (targetOffset - player.laneOffset) * laneEase;
-  if(Math.abs(targetOffset-player.laneOffset) < 0.05) player.laneOffset = targetOffset;
+  if(!player.arcTurn){
+    const targetOffset = player.parkPad ? player.parkPad.cross
+      : player.carPark ? player.carPark.entrance.cross
+      : (player.lane * LANE_OFFSET + avoid);
+    const laneEase = 1 - Math.exp(-LANE_SPEED/LANE_OFFSET*dt);
+    player.laneOffset += (targetOffset - player.laneOffset) * laneEase;
+    if(Math.abs(targetOffset-player.laneOffset) < 0.05) player.laneOffset = targetOffset;
+  }
 
   // how far mid-turn the heading still has to catch up to its target —
-  // used below to gate the lane-change yaw and to drive the cornering lean
+  // only meaningful for the lane-change yaw/bank below when there's no
+  // corner arc in progress (during one, player.arcTurn.sweep drives those
+  // instead — see below)
   let headingGap = player.targetHeading - player.heading;
   while(headingGap > Math.PI) headingGap -= Math.PI*2;
   while(headingGap < -Math.PI) headingGap += Math.PI*2;
-  const turningNow = Math.abs(headingGap) > 0.05;
   if(player.turnSettleT > 0) player.turnSettleT -= dt;
 
   // a lane change was a pure sideways glide before — no visible steering,
@@ -2391,19 +2416,21 @@ function updatePlayer(dt){
   // x-axis street as it does on a z-axis one
   const laneVel = dt > 0 ? (player.laneOffset - prevLaneOffset) / dt : 0;
   const rightSign = player.dir * (player.axis==='z' ? 1 : -1);
-  const yaw = turningNow ? 0 : clamp(laneVel / LANE_SPEED, -1, 1) * 0.3 * rightSign;
+  const yaw = player.arcTurn ? 0 : clamp(laneVel / LANE_SPEED, -1, 1) * 0.3 * rightSign;
   player.visualHeading = player.heading + yaw;
 
-  // a corner taken at speed banks the car over — "two wheels" lean. Driven
-  // directly by how far mid-turn the heading still has to catch up to its
-  // target, so it eases in and out with the same swing approachHeading
-  // already animates, and only shows up when actually moving fast.
+  // a corner taken at speed banks the car over — "two wheels" lean. During
+  // an actual corner arc this tracks how much of the 90° sweep is still
+  // left (1 at the start, 0 right as it straightens out); otherwise it
+  // falls back to the old lane-settle heading-gap version.
   const speedFrac = clamp(Math.abs(player.speed)/player.maxSpeed, 0, 1);
-  player.roll = clamp(headingGap/(Math.PI/2), -1, 1) * 0.26 * speedFrac;
+  player.roll = player.arcTurn
+    ? player.arcTurn.turnSign * (1 - player.arcTurn.sweep/(Math.PI/2)) * 0.26 * speedFrac
+    : clamp(headingGap/(Math.PI/2), -1, 1) * 0.26 * speedFrac;
 
   // tires screech on a hard, fast turn or a hard stop from speed —
   // debounced so it fires once per event, not every frame it's true
-  const cornering = Math.abs(headingGap) > 0.15 && Math.abs(player.speed) > 70;
+  const cornering = (player.arcTurn ? true : Math.abs(headingGap) > 0.15) && Math.abs(player.speed) > 70;
   const hardBraking = brake && Math.abs(player.speed) > 100;
   if((cornering || hardBraking) && !player.screeching){
     SFX.screech();
@@ -2412,16 +2439,56 @@ function updatePlayer(dt){
     player.screeching = false;
   }
 
-  const fixedCoord = player.streetCoord + player.laneOffset;
-  let nx, nz;
-  if(player.axis==='z'){ nz = player.z + player.dir*player.speed*dt; nx = fixedCoord; }
-  else { nx = player.x + player.dir*player.speed*dt; nz = fixedCoord; }
+  // the corner arc: a real continuous sweep instead of a grid-snap-then-
+  // pivot. Heading and position are integrated together every frame from
+  // wherever the car actually is right now (standard kinematic circular
+  // motion: angular rate = speed/radius) until a full quarter turn (PI/2)
+  // has been swept, at which point axis/dir/lane/streetCoord (deferred by
+  // turnPlayer) are finally applied and the car is simply driving straight
+  // down the new street already lined up with it.
+  let nx, nz, fixedCoord;
+  if(player.arcTurn){
+    const at = player.arcTurn;
+    let dHeading = (player.speed / CORNER_RADIUS) * at.turnSign * dt;
+    const remaining = Math.PI/2 - at.sweep;
+    if(Math.abs(dHeading) > remaining) dHeading = remaining * (dHeading < 0 ? -1 : 1);
+    player.heading += dHeading;
+    at.sweep += Math.abs(dHeading);
+    nx = player.x + Math.sin(player.heading)*player.speed*dt;
+    nz = player.z + Math.cos(player.heading)*player.speed*dt;
+    if(at.sweep >= Math.PI/2 - 1e-6){
+      player.axis = at.nextAxis;
+      player.dir = at.nextDir;
+      player.lane = at.nextLane;
+      player.streetCoord = at.nextStreetCoord;
+      player.targetHeading = cardinalHeading(at.nextAxis, at.nextDir);
+      player.heading = player.targetHeading; // trim any float drift from the sweep
+      // laneOffset was never touched during the arc (lateral position was
+      // driven entirely by the circular integration above), so it's still
+      // sitting at whatever it was on the OLD street. The very next frame
+      // resumes normal axis-locked movement via streetCoord+laneOffset --
+      // left stale, that snaps the car sideways onto a totally different
+      // point than where the arc actually just left it. Back-solve it from
+      // the arc's own endpoint (nx/nz, about to be applied below) so this
+      // frame's lateral position is exactly continuous, and the normal
+      // lane-ease (resuming next frame) carries it the rest of the way to
+      // the real target lane from there, same as any ordinary lane change.
+      player.laneOffset = (at.nextAxis==='x' ? nz : nx) - player.streetCoord;
+      player.turnSettleT = 1.2; // see the median-collision exemption below
+      player.arcTurn = null;
+    }
+  } else {
+    fixedCoord = player.streetCoord + player.laneOffset;
+    if(player.axis==='z'){ nz = player.z + player.dir*player.speed*dt; nx = fixedCoord; }
+    else { nx = player.x + player.dir*player.speed*dt; nz = fixedCoord; }
+  }
 
   // roadworks are ramps now (see where they're generated): crossing one's
   // midpoint while actually lined up with its lane launches the player
   // briefly airborne, scaled by how fast they hit it, rather than
-  // blocking the lane the way they used to
-  if(!player.airborne){
+  // blocking the lane the way they used to. Skipped mid-arc, same as the
+  // car park ramp below -- both assume a normal axis-locked lane.
+  if(!player.airborne && !player.arcTurn){
     const forward = player.axis==='z' ? player.z : player.x;
     const nextForward = player.axis==='z' ? nz : nx;
     for(const rw of roadworks){
@@ -2442,7 +2509,7 @@ function updatePlayer(dt){
   // do, with a bigger kick since there's a whole floor's height to fall
   // back from. Depth-crossing is checked the same single-shot way the
   // roadworks midpoint is, via the last depth sampled a frame ago.
-  if(player.carPark && !player.airborne){
+  if(player.carPark && !player.airborne && !player.arcTurn){
     const ent = player.carPark.entrance;
     const forward = ent.axis==='z' ? nz : nx;
     const depth = (forward - ent.along) * player.dir;
@@ -2472,7 +2539,7 @@ function updatePlayer(dt){
     rx = nx; rz = nz;
   } else {
     rx = player.x; rz = player.z;
-    const skipMedians = turningNow || player.turnSettleT > 0;
+    const skipMedians = !!player.arcTurn || player.turnSettleT > 0;
     if(collideWorld(nx, rz, CAR_R, skipMedians)) hit = true; else rx = nx;
     if(collideWorld(rx, nz, CAR_R, skipMedians)) hit = true; else rz = nz;
   }
@@ -2547,17 +2614,16 @@ function collideBuildings(x, z, r){
 // drive straight through traffic. Roadworks are NOT here: they're ramps
 // now, not a closure, handled by the launch check in updatePlayer instead
 // of blocking the lane (see where they're generated).
-// ignoreMedians: a car mid-turn pivots its heading in place while its
-// position barely advances, so its lane-change sweep (easing sideways
-// into the new street's correct lane) can pass straight through a median
-// strip's z/x-band that a car driving normally would never come near —
-// the median's job is stopping a car from cutting across to the wrong
-// carriageway while driving straight, not blocking a turn that's still
-// catching up visually. No fixed gap width around every junction can
-// outrun this (the car is already accelerating hard down the new street
-// by the time its heading/lane settle), so the player skips median
-// collision for the brief window its heading hasn't caught up yet
-// instead (see turningNow in updatePlayer) — buildings/garages/
+// ignoreMedians: the player's corner arc (see player.arcTurn in
+// updatePlayer) sweeps across the old street's lane and, right after
+// finishing, settles sideways into the new street's correct lane — both of
+// which can cross a median strip's z/x-band that a car driving normally
+// down either street would never come near. The median's job is stopping
+// a car from cutting across to the wrong carriageway while driving
+// straight, not blocking a turn or its lane-settle tail. No fixed gap
+// width around every junction can outrun this reliably at every speed, so
+// the player skips median collision for the whole arc plus a short settle
+// window after it (player.turnSettleT) instead — buildings/garages/
 // roundabouts stay fully solid throughout.
 function collideWorld(x, z, r, ignoreMedians){
   if(collideBuildings(x,z,r)) return true;
@@ -2929,6 +2995,11 @@ function updateWantedState(dt){
 function checkPlayerViolations(dt){
   player.violateCooldown = Math.max(0, (player.violateCooldown||0) - dt);
   if(player.violateCooldown > 0) return;
+  // mid-arc, player.axis/dir still describe the street being LEFT, not the
+  // one the car is actually sweeping across -- these checks would be
+  // testing the wrong line. A car already committed to a turn through the
+  // junction isn't "running" anything at it anyway.
+  if(player.arcTurn) return;
   const policeNear = () => police.some(p => dist2(p.x,p.z,player.x,player.z) < 350*350);
 
   for(const tl of trafficLights){
