@@ -323,8 +323,19 @@ const CAM_HEADING_RATE = 2.4;      // exponential catch-up rate for the chase ca
                                     // car's own heading, reading as the view "turning
                                     // with" (or even slightly ahead of) the car instead
                                     // of catching up a beat after, like the original
-const JUNCTION_WINDOW = 70;        // how close to a crossing a turn can be started —
-                                    // wide on purpose, turning was too easy to miss
+// how close to the actual crossing a QUEUED turn (Q/E pressed early is fine
+// — see player.pendingTurn) is allowed to fire. turnPlayer() snaps
+// player.streetCoord straight to the crossing's own line the instant it
+// fires, and the lane-easing then has to close the gap between wherever
+// the car actually still was and that line — with the old 70-unit window,
+// that gap could be up to 70 units, closed by physics tuned for small
+// (~16-unit) lane-change adjustments, which read as the car suddenly
+// jumping forward to the corner before visibly turning. A small window
+// keeps that gap under a car length; it just needs to stay comfortably
+// above the single worst-case frame step (dt is capped at 0.05s, top
+// speed ~220, so ~11 units) so a fast car can't blow through it between
+// checks.
+const JUNCTION_WINDOW = 14;
 const FUEL_ENABLED = true;         // gas stations now actually matter — find one before the tank runs dry
 const ROUNDABOUTS_ENABLED = true;  // experimental, flag-gated per request — a small
                                     // collidable island the player must steer around
@@ -345,6 +356,20 @@ const ARTERIAL_LANES_PER_SIDE = 3;
 const ARTERIAL_TURN_LANE_HALF = 8;   // half-width of the center turn lane
 const ARTERIAL_DRIVABLE_HALF = ARTERIAL_TURN_LANE_HALF + ARTERIAL_LANES_PER_SIDE*ARTERIAL_LANE_W; // 56
 const ROAD_HALF_ARTERIAL = ARTERIAL_DRIVABLE_HALF + 20; // + sidewalk & margin
+// how far off a junction's own centerline a car approaching it can sit and
+// still be recognized as "at this junction" by redLightAhead/stopSignAhead/
+// levelCrossingBlocked (and the player's own red-light check). A car is
+// never actually ON the centerline — it's always offset by its lane — and
+// with up to ARTERIAL_LANES_PER_SIDE (3) lanes at LANE_OFFSET (16) each, a
+// car in the outermost arterial lane sits 48 units off center. The old
+// flat 8-unit tolerance those checks used only ever matched a hypothetical
+// car sitting exactly on the centerline, so in practice stop signs and red
+// lights almost never registered for real, lane-following traffic (or the
+// player, in any lane but a single-lane minor street) — this is why
+// traffic was blowing straight through both. 54 clears the widest arterial
+// lane with margin, and is still far short of BLOCK (600), so it can't
+// bleed into an unrelated nearby street.
+const JUNCTION_CROSS_TOLERANCE = 54;
 const TL_CYCLE = 7, TL_AMBER = 1.2, TL_GAP = 1.5; // traffic-light phase timing (seconds) — TL_GAP also doubles as the red-amber duration
 const TL_STOP_WINDOW = 26;         // how far ahead of a red/amber light traffic stops
 const SIGN_TYPES = ['stop','give_way','speed','direction'];
@@ -2515,7 +2540,12 @@ function collideWorld(x, z, r){
   // margin lets two cars pass side by side in adjacent lanes, while the
   // longitudinal margin (same as the old radius) keeps following/merging
   // distance unchanged.
-  const longMargin = r+8, latMargin = r-1.5;
+  // r-1.5 (7.5) still clipped in practice: two cars each holding that much
+  // lateral margin only need a ~1-unit nudge (easing overshoot, a car
+  // mid-lane-change) to overlap across the full 16-unit lane spacing.
+  // r-4 leaves real slack (worst case 10 of the 16 units) for ordinary
+  // driving noise instead of requiring pixel-perfect lane centering.
+  const longMargin = r+8, latMargin = r-4;
   for(const c of allTraffic()){
     const dx = x-c.x, dz = z-c.z;
     const along = c.axis==='z' ? Math.abs(dz) : Math.abs(dx);
@@ -2856,7 +2886,7 @@ function checkPlayerViolations(dt){
     const lineCoord = axis==='z' ? tl.z : tl.x;
     const crossCoord = axis==='z' ? tl.x : tl.z;
     const cross = axis==='z' ? player.x : player.z;
-    if(Math.abs(cross-crossCoord) > 8) continue;
+    if(Math.abs(cross-crossCoord) > JUNCTION_CROSS_TOLERANCE) continue;
     const forward = axis==='z' ? player.z : player.x;
     const distToLine = dir>0 ? (lineCoord-forward) : (forward-lineCoord);
     if(Math.abs(distToLine) < 10 && Math.abs(player.speed) > 30 && trafficPhase(axis, worldTime) !== 'green'){
@@ -2926,7 +2956,7 @@ function redLightAhead(car){
   for(const tl of trafficLights){
     const lineCoord = axis==='z' ? tl.z : tl.x;
     const crossCoord = axis==='z' ? tl.x : tl.z;
-    if(Math.abs(cross-crossCoord) > 8) continue;
+    if(Math.abs(cross-crossCoord) > JUNCTION_CROSS_TOLERANCE) continue;
     const distToLine = dir>0 ? (lineCoord-forward) : (forward-lineCoord);
     if(distToLine > 0 && distToLine < TL_STOP_WINDOW){
       return trafficPhase(axis, worldTime) !== 'green';
@@ -2950,7 +2980,7 @@ function stopSignAhead(car){
     if(!ss.stopAxes.includes(axis)) continue;
     const lineCoord = axis==='z' ? ss.z : ss.x;
     const crossCoord = axis==='z' ? ss.x : ss.z;
-    if(Math.abs(cross-crossCoord) > 8) continue;
+    if(Math.abs(cross-crossCoord) > JUNCTION_CROSS_TOLERANCE) continue;
     const distToLine = dir>0 ? (lineCoord-forward) : (forward-lineCoord);
     if(distToLine > 0 && distToLine < STOP_SIGN_WINDOW){
       const key = ss.x+','+ss.z+','+axis;
@@ -2975,7 +3005,7 @@ function levelCrossingState(t){
   return {phase:'raising', barrierT:1-q/LC_RAISE, trainT:1};
 }
 function levelCrossingBlocked(car){
-  if(car.axis !== 'z' || Math.abs(car.x-levelCrossing.x) > 8) return false;
+  if(car.axis !== 'z' || Math.abs(car.x-levelCrossing.x) > JUNCTION_CROSS_TOLERANCE) return false;
   if(levelCrossingState(worldTime).phase === 'open') return false;
   const distToLine = car.dir>0 ? (levelCrossing.z-car.z) : (car.z-levelCrossing.z);
   return distToLine > 0 && distToLine < TL_STOP_WINDOW;
@@ -5073,17 +5103,21 @@ function buildSignQuads(sg){
 // already uses, so lamps and headlights come on together.
 function buildStreetLampQuads(lp){
   const quads = [];
-  // taller pole and a much longer overhanging arm — Turbo Esprit's own
-  // streetlights cantilever well out over the carriageway, not just a
-  // token foot or two past the curb
   const poleH = 24, px = lp.x, pz = lp.z;
   const poleColor = 'rgb(68,70,74)';
   quads.push({pts:[[px-0.8,0,pz],[px-0.8,poleH,pz],[px+0.8,poleH,pz],[px+0.8,0,pz]], color:poleColor});
   quads.push({pts:[[px,0,pz-0.8],[px,poleH,pz-0.8],[px,poleH,pz+0.8],[px,0,pz+0.8]], color:poleColor});
 
   // the arm reaches from the pole top out over the road, in whichever
-  // direction lp.dx/lp.dz point (toward the street, away from the curb)
-  const hx = px + lp.dx*24, hz = pz + lp.dz*24, hy = poleH + 1.5;
+  // direction lp.dx/lp.dz point (toward the street, away from the curb) --
+  // a real cobra-head arm clears the first lane, it doesn't reach for the
+  // centerline. This used to cantilever 24 units out regardless of the
+  // street it was on; the pole itself sits only ~4 units in from a minor
+  // street's edge (see where streetLamps are generated), so a 24-unit arm
+  // put the actual lit head practically in the middle of the carriageway
+  // on anything but the widest arterials.
+  const ARM_LEN = 10;
+  const hx = px + lp.dx*ARM_LEN, hz = pz + lp.dz*ARM_LEN, hy = poleH + 1.5;
   const armW = 0.9;
   quads.push({pts:[
     [px-lp.dz*armW, poleH, pz+lp.dx*armW],
