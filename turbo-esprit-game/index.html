@@ -335,7 +335,7 @@ const CAM_HEADING_RATE = 2.4;      // exponential catch-up rate for the chase ca
 // above the single worst-case frame step (dt is capped at 0.05s, top
 // speed ~220, so ~11 units) so a fast car can't blow through it between
 // checks.
-const JUNCTION_WINDOW = 14;
+const JUNCTION_WINDOW = 26;
 // updatePendingTurn() used to gate on the CAR'S CENTER point (player.x/z)
 // being near the junction line — but that point is roughly the middle of
 // the body, with the front wheels sitting ~9 units ahead of it (see
@@ -357,12 +357,13 @@ const CAR_FRONT_OFFSET = 9;
 // and pivoting on the spot. Small enough to read as a tight city-street
 // turn, bigger than LANE_OFFSET so the lane change reads as part of the
 // same sweep rather than a separate slide tacked onto the end of it.
-const CORNER_RADIUS = 20;
+const CORNER_RADIUS = 32;
 const FUEL_ENABLED = true;         // gas stations now actually matter — find one before the tank runs dry
 const ROUNDABOUTS_ENABLED = true;  // experimental, flag-gated per request — a small
-                                    // collidable island the player must steer around
-                                    // using the existing lane system; AI traffic
-                                    // doesn't route around it yet, only the player
+                                    // collidable island every car steers around using
+                                    // the existing lane system (see obstacleAvoidOffset,
+                                    // which applies this to AI traffic too, unlike the
+                                    // roadworks block right above it in that function)
 // Roads are no longer one uniform width. Minor streets keep the original
 // footprint; priority/arterial streets (see ARTERIAL_STEP below) are
 // physically widened — buildings along an arterial set back further on
@@ -746,10 +747,19 @@ function generateCity(seed){
   // which read as flickering debris in the middle of the road
   sidewalks = [];
   const swWidth = 11;
+  // on an arterial, the curb sits right at the edge of the last marked
+  // lane (no gap) -- using the generic roadHalf-based offset here left an
+  // ~8-unit strip of plain paved road between the outermost lane's own
+  // marked edge (ARTERIAL_DRIVABLE_HALF) and the sidewalk, wide enough to
+  // read as an extra unmarked lane next to three properly 16-unit-wide
+  // ones: part of the same "lanes aren't the same width" complaint as the
+  // missing turn-lane divider fixed above. Minor streets have no lane
+  // markings to butt up against, so they keep the original curb offset.
+  const sidewalkInset = (rh) => rh===ROAD_HALF_ARTERIAL ? ARTERIAL_DRIVABLE_HALF+swWidth/2 : rh-swWidth/2-1;
   for(let ix=0; ix<streetLinesX.length; ix++){
     const x = streetLinesX[ix];
     for(let side of [-1,1]){
-      const sx = x + side*(roadHalfX[ix]-swWidth/2-1);
+      const sx = x + side*sidewalkInset(roadHalfX[ix]);
       for(let i=0;i<BLOCKS_Z;i++){
         const z1 = streetLinesZ[i]+roadHalfZ[i]+8, z2 = streetLinesZ[i+1]-roadHalfZ[i+1]-8;
         if(z2>z1) sidewalks.push({x1:sx-swWidth/2, x2:sx+swWidth/2, z1, z2});
@@ -759,7 +769,7 @@ function generateCity(seed){
   for(let iz=0; iz<streetLinesZ.length; iz++){
     const z = streetLinesZ[iz];
     for(let side of [-1,1]){
-      const sz = z + side*(roadHalfZ[iz]-swWidth/2-1);
+      const sz = z + side*sidewalkInset(roadHalfZ[iz]);
       for(let i=0;i<BLOCKS_X;i++){
         const x1 = streetLinesX[i]+roadHalfX[i]+8, x2 = streetLinesX[i+1]-roadHalfX[i+1]-8;
         if(x2>x1) sidewalks.push({x1, x2, z1:sz-swWidth/2, z2:sz+swWidth/2});
@@ -1347,10 +1357,22 @@ function randomStreetPoint(){
 // top of (or a half-second's drive from) the player's own starting spot,
 // reading as an unfair instant collision before the round even began
 const SPAWN_CLEAR_RADIUS = 160;
+const TRAFFIC_SPAWN_CLEAR_RADIUS = 40; // just needs to not land stacked on another car; the full 160 is a player-specific fairness margin
 function spawnStreetCar(color, speed, type){
   let p = randomStreetPoint();
   let clearTries = 0;
-  while(player && dist2(p.x,p.z,player.x,player.z) < SPAWN_CLEAR_RADIUS*SPAWN_CLEAR_RADIUS && clearTries<20){
+  const tooClose = () => {
+    if(player && dist2(p.x,p.z,player.x,player.z) < SPAWN_CLEAR_RADIUS*SPAWN_CLEAR_RADIUS) return true;
+    // the clearance check only ever looked at the player, so two AI cars
+    // could spawn stacked on each other with nothing to separate them
+    // afterward (updateStreetCar only brakes for the player ahead, not for
+    // other traffic) -- they'd sit genuinely overlapping, not just a near
+    // miss, until one happened to turn off.
+    for(const c of allTraffic()) if(dist2(p.x,p.z,c.x,c.z) < TRAFFIC_SPAWN_CLEAR_RADIUS*TRAFFIC_SPAWN_CLEAR_RADIUS) return true;
+    if(suspect && dist2(p.x,p.z,suspect.x,suspect.z) < TRAFFIC_SPAWN_CLEAR_RADIUS*TRAFFIC_SPAWN_CLEAR_RADIUS) return true;
+    return false;
+  };
+  while(tooClose() && clearTries<20){
     p = randomStreetPoint();
     clearTries++;
   }
@@ -2252,9 +2274,9 @@ function queueTurn(side){
 // street once you're pointed this way — right-hand traffic convention
 // which lane is "correct" (non-oncoming) once you're pointed this way —
 // flip DRIVE_SIDE in the config block up top to switch the whole game
-// from right-hand traffic (US-style) to left-hand (UK-style); AI traffic
-// doesn't use lanes for its own position (see spawnStreetCar), so this
-// only needs to touch the player's own lane logic
+// from right-hand traffic (US-style) to left-hand (UK-style). AI traffic
+// uses this too (see snapToLane, called from spawnStreetCar and whenever
+// a car turns) to assign its own real lane, same as the player.
 function correctLane(axis, dir, line){
   // the perimeter one-way streets aren't a normal two-sided road split
   // into a correct/oncoming half — the "other side" from the normal
@@ -2791,31 +2813,47 @@ function updateStreetCar(car, dt){
   const honkMul = car.honkTimer > 0 ? 1.5 : 1;
 
   // the player already stops for traffic (collideWorld, in updatePlayer),
-  // but that's a one-way rule — traffic never checked for the player at
-  // all, so it drove straight through a stationary or oncoming car with
-  // nothing to stop it. A real driver slows smoothly as the gap closes
-  // rather than teleporting to a dead stop the instant it would overlap —
-  // only a genuine "couldn't stop in time" case (the player well inside
-  // the car's stopping distance) still ends in an actual crash.
+  // but that used to be a one-way rule — traffic only ever checked for the
+  // player, never for each other, so two AI cars drove straight through
+  // one another with nothing to stop it (and could even spawn stacked on
+  // top of each other — see the matching clearance fix in spawnStreetCar).
+  // A real driver slows smoothly as the gap closes rather than teleporting
+  // to a dead stop the instant it would overlap; find whichever vehicle is
+  // nearest ahead in roughly the same lane, player or AI, and brake for
+  // that one.
   car.crashCooldown = Math.max(0, (car.crashCooldown||0) - dt);
   const avoid = obstacleAvoidOffset(car);
   const crossPos = car.laneHome + avoid;
   const forward = car.axis==='z' ? car.z : car.x;
   const BRAKE_DIST = 90, MIN_GAP = 20;
   let speedTarget = car.maxSpeed;
-  if(player){
-    const playerForward = car.axis==='z' ? player.z : player.x;
-    const playerCross = car.axis==='z' ? player.x : player.z;
-    const aheadDist = (playerForward - forward) * car.dir;
-    const lateralGap = Math.abs(crossPos - playerCross);
-    if(aheadDist > 0 && aheadDist < BRAKE_DIST && lateralGap < 13){
-      const frac = clamp((aheadDist-MIN_GAP)/(BRAKE_DIST-MIN_GAP), 0, 1);
-      speedTarget = car.maxSpeed * frac;
-      if(aheadDist < MIN_GAP*0.6 && car.crashCooldown<=0){
-        SFX.crash();
-        car.crashCooldown = 1.5;
-        speedTarget = 0;
-      }
+  let nearestAhead = Infinity, nearestIsPlayer = false;
+  const checkAhead = (other) => {
+    if(!other || other === car) return;
+    const oForward = car.axis==='z' ? other.z : other.x;
+    const oCross = car.axis==='z' ? other.x : other.z;
+    const aheadDist = (oForward - forward) * car.dir;
+    const lateralGap = Math.abs(crossPos - oCross);
+    if(aheadDist > 0 && aheadDist < BRAKE_DIST && lateralGap < 13 && aheadDist < nearestAhead){
+      nearestAhead = aheadDist;
+      nearestIsPlayer = other === player;
+    }
+  };
+  checkAhead(player);
+  checkAhead(suspect);
+  for(const other of allTraffic()) checkAhead(other);
+  if(nearestAhead < BRAKE_DIST){
+    const frac = clamp((nearestAhead-MIN_GAP)/(BRAKE_DIST-MIN_GAP), 0, 1);
+    speedTarget = car.maxSpeed * frac;
+    // an actual crash (sound + hard stop), only against the player —
+    // two AI cars following closely is just normal traffic flow (a queue
+    // at a stop sign, merging in), not a crash every time it happens, and
+    // only a genuine "couldn't stop in time" case against the PLAYER
+    // (well inside the car's stopping distance) should end in one
+    if(nearestIsPlayer && nearestAhead < MIN_GAP*0.6 && car.crashCooldown<=0){
+      SFX.crash();
+      car.crashCooldown = 1.5;
+      speedTarget = 0;
     }
   }
   if(car.speed < speedTarget) car.speed = Math.min(speedTarget, car.speed + 90*dt);
@@ -2945,7 +2983,14 @@ function updateStreetCar(car, dt){
 
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
-function allTraffic(){ return [...police, ...ambulances, ...fireTrucks, ...dumpTrucks, ...streetSweepers, ...buses, ...motorbikes, ...vans, ...ebikes, ...civilians]; }
+// guarded with `||[]` because the bootstrap sequence at the bottom of this
+// file spawns each of these arrays' own first car via spawnStreetCar
+// (e.g. `police = [spawnStreetCar(...)]`) before that array's own
+// assignment completes -- spawnStreetCar's spawn-clearance check now calls
+// allTraffic() too (see TRAFFIC_SPAWN_CLEAR_RADIUS), so during that
+// bootstrap window several of these are still genuinely undefined, not
+// just empty.
+function allTraffic(){ return [...(police||[]), ...(ambulances||[]), ...(fireTrucks||[]), ...(dumpTrucks||[]), ...(streetSweepers||[]), ...(buses||[]), ...(motorbikes||[]), ...(vans||[]), ...(ebikes||[]), ...(civilians||[])]; }
 function allCars(){ return [player, suspect, ...allTraffic()]; }
 
 // Getting too close to any moving traffic costs time and speed — just
