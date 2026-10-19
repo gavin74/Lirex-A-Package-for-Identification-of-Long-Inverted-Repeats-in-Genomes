@@ -1126,8 +1126,18 @@ function approachHeading(car, dt, rate){
   const EASE_WINDOW = 0.18, EASE_FLOOR = 0.2;
   const easeFrac = clamp(car.turnEaseT/EASE_WINDOW, 0, 1);
   const smooth = easeFrac*easeFrac*(3-2*easeFrac);
+  // the car's logical position snaps onto the new axis at the junction
+  // immediately regardless of this animation (heading is purely cosmetic,
+  // see the function comment) — so slowing the turn down at speed doesn't
+  // just look "wide", it opens a real gap between where the body is still
+  // visually pointing and the street the car is already barreling down.
+  // At 200+ units/sec a 2x-longer turn covers 150+ extra units before the
+  // body catches up, which reads as the car suddenly jumping forward to
+  // meet its own position. Only speed the low end up (a genuinely snappy
+  // crawl-speed turn costs nothing, since the car can't have travelled far
+  // during it either way) and leave full speed exactly at the old rate.
   const speedFrac = clamp(Math.abs(car.speed)/car.maxSpeed, 0, 1);
-  const speedMul = lerp(1.35, 0.55, speedFrac);
+  const speedMul = lerp(1.5, 1.0, speedFrac);
   const effRate = rate * speedMul * Math.max(smooth, EASE_FLOOR);
   const maxStep = effRate*dt;
   if(Math.abs(delta) <= maxStep) car.heading = car.targetHeading;
