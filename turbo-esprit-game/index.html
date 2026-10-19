@@ -376,8 +376,7 @@ const ROUNDABOUTS_ENABLED = true;  // experimental, flag-gated per request — a
 const ROAD_HALF_MINOR = (BLOCK - BUILD_HALF*2) / 2;
 const ARTERIAL_LANE_W = 16;          // width of each through lane
 const ARTERIAL_LANES_PER_SIDE = 3;
-const ARTERIAL_TURN_LANE_HALF = 8;   // half-width of the center turn lane
-const ARTERIAL_DRIVABLE_HALF = ARTERIAL_TURN_LANE_HALF + ARTERIAL_LANES_PER_SIDE*ARTERIAL_LANE_W; // 56
+const ARTERIAL_DRIVABLE_HALF = ARTERIAL_LANES_PER_SIDE*ARTERIAL_LANE_W; // 48
 const ROAD_HALF_ARTERIAL = ARTERIAL_DRIVABLE_HALF + 20; // + sidewalk & margin
 // how far off a junction's own centerline a car approaching it can sit and
 // still be recognized as "at this junction" by redLightAhead/stopSignAhead/
@@ -679,22 +678,20 @@ function generateCity(seed){
   roadMarks = [];
   const dashLen = 20, dashGap = 22, dashHalfWid = 1.4;
   const TURN_LANE_COLOR = 'rgba(214,190,100,0.85)';
-  // arterials get the lane layout painted on: a single dashed yellow line
-  // dead center (the center turn lane itself is still real and drivable —
-  // see laneCountAt/ARTERIAL_TURN_LANE_HALF — only the marking is a single
-  // line now, not a yellow line on each side of it, which read as two
-  // separate direction dividers instead of one) plus a dashed white
-  // divider between each of the 3 through lanes on each side
+  // arterials get a real 6-lane layout: a dashed yellow line dead center
+  // (there used to be a center turn lane here, flanked by white lines the
+  // same 16 units apart as every other lane boundary — since nothing ever
+  // actually drove in it (snapToLane's lane magnitude starts at 1, and
+  // changeLane explicitly steps over lane 0), it only read as an extra
+  // "lane" with the direction-divider line buried in the middle of it,
+  // not as the center of the road. Removed, so the yellow line now sits
+  // directly between the two innermost through lanes, same as every
+  // other lane boundary) plus a dashed white divider between each of the
+  // 3 through lanes on each side (not at the outermost edge, which is the
+  // shoulder/curb, not a lane boundary).
   const arterialOffsets = [{off:0, color:TURN_LANE_COLOR}];
-  for(let lane=1; lane<=ARTERIAL_LANES_PER_SIDE; lane++){
-    // lane=1's edge is the turn lane / first-through-lane boundary -- it
-    // was being skipped (loop used to start at 2), leaving that boundary
-    // unmarked while the other two lane dividers were. With no line there,
-    // the turn lane and first lane visually read as one single ~24-unit
-    // lane while the properly-divided lanes next to it read as the normal
-    // 16, making the road look like it had mismatched lane widths.
-    const edge = ARTERIAL_TURN_LANE_HALF + (lane-1)*ARTERIAL_LANE_W;
-    if(edge === 0) continue;
+  for(let lane=1; lane<ARTERIAL_LANES_PER_SIDE; lane++){
+    const edge = lane*ARTERIAL_LANE_W;
     arterialOffsets.push({off:edge});
     arterialOffsets.push({off:-edge});
   }
@@ -715,8 +712,12 @@ function generateCity(seed){
         const segStart = streetLinesZ[j]+roadHalfZ[j], segEnd = streetLinesZ[j+1]-roadHalfZ[j+1];
         if(segEnd<=segStart) continue;
         for(let z=segStart+dashGap; z<segEnd; z+=dashLen+dashGap){
-          const zEnd = Math.min(z+dashLen, segEnd);
-          if(zEnd<=z) continue;
+          // drop a trailing dash that doesn't fully fit rather than
+          // truncating it to a short stub — a scattering of odd
+          // half-length dashes right before every junction read as a
+          // rendering glitch, not an intentional shorter mark
+          const zEnd = z+dashLen;
+          if(zEnd>segEnd) continue;
           roadMarks.push({x1:x+off-dashHalfWid, x2:x+off+dashHalfWid, z1:z, z2:zEnd, color});
         }
       }
@@ -730,8 +731,8 @@ function generateCity(seed){
         const segStart = streetLinesX[j]+roadHalfX[j], segEnd = streetLinesX[j+1]-roadHalfX[j+1];
         if(segEnd<=segStart) continue;
         for(let x=segStart+dashGap; x<segEnd; x+=dashLen+dashGap){
-          const xEnd = Math.min(x+dashLen, segEnd);
-          if(xEnd<=x) continue;
+          const xEnd = x+dashLen;
+          if(xEnd>segEnd) continue;
           roadMarks.push({x1:x, x2:xEnd, z1:z+off-dashHalfWid, z2:z+off+dashHalfWid, color});
         }
       }
