@@ -336,6 +336,21 @@ const CAM_HEADING_RATE = 2.4;      // exponential catch-up rate for the chase ca
 // speed ~220, so ~11 units) so a fast car can't blow through it between
 // checks.
 const JUNCTION_WINDOW = 14;
+// updatePendingTurn() used to gate on the CAR'S CENTER point (player.x/z)
+// being near the junction line — but that point is roughly the middle of
+// the body, with the front wheels sitting ~9 units ahead of it (see
+// SPORTS_WHEEL_ZF). Checking the center meant the turn didn't start
+// rotating until the center was within JUNCTION_WINDOW of the line, by
+// which point the front of the car — the end that actually needs to be
+// at the corner to look right — had typically already driven PAST it:
+// worst case, the center could still be sitting just before the window
+// edge on one frame and jump to just past it on the next (see the
+// frame-step reasoning above), landing the nose over a car-length beyond
+// the corner before any heading change began. Checking the front-axle
+// point instead (center shifted forward by this much) lines the trigger
+// up with where a real driver actually starts turning: right as their
+// front wheels reach the junction, not their whole body.
+const CAR_FRONT_OFFSET = 9;
 const FUEL_ENABLED = true;         // gas stations now actually matter — find one before the tank runs dry
 const ROUNDABOUTS_ENABLED = true;  // experimental, flag-gated per request — a small
                                     // collidable island the player must steer around
@@ -2268,8 +2283,9 @@ function turnPlayer(side){
 function updatePendingTurn(){
   if(!player.pendingTurn) return;
   const forward = player.axis==='z' ? player.z : player.x;
+  const noseForward = forward + player.dir * CAR_FRONT_OFFSET;
   const lines = player.axis==='z' ? streetLinesZ : streetLinesX;
-  if(lines.some(line => Math.abs(forward-line) < JUNCTION_WINDOW)){
+  if(lines.some(line => Math.abs(noseForward-line) < JUNCTION_WINDOW)){
     turnPlayer(player.pendingTurn);
     player.pendingTurn = null;
   }
