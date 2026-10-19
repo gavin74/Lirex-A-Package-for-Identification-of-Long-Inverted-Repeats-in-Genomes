@@ -685,7 +685,13 @@ function generateCity(seed){
   // separate direction dividers instead of one) plus a dashed white
   // divider between each of the 3 through lanes on each side
   const arterialOffsets = [{off:0, color:TURN_LANE_COLOR}];
-  for(let lane=2; lane<=ARTERIAL_LANES_PER_SIDE; lane++){
+  for(let lane=1; lane<=ARTERIAL_LANES_PER_SIDE; lane++){
+    // lane=1's edge is the turn lane / first-through-lane boundary -- it
+    // was being skipped (loop used to start at 2), leaving that boundary
+    // unmarked while the other two lane dividers were. With no line there,
+    // the turn lane and first lane visually read as one single ~24-unit
+    // lane while the properly-divided lanes next to it read as the normal
+    // 16, making the road look like it had mismatched lane widths.
     const edge = ARTERIAL_TURN_LANE_HALF + (lane-1)*ARTERIAL_LANE_W;
     if(edge === 0) continue;
     arterialOffsets.push({off:edge});
@@ -3740,6 +3746,29 @@ function facePlanePts(faceAxis, constVal, a0, a1, y0, y1){
   return [[a0,y0,constVal],[a0,y1,constVal],[a1,y1,constVal],[a1,y0,constVal]];
 }
 
+// Same rectangle as facePlanePts, but chopped into pieces along its long
+// axis (a0..a1) no longer than maxLen. A building wall can run up to a few
+// hundred units — rendered as one quad, its depth-sort key (faceDepth's
+// single centroid) can be wildly wrong whenever the wall runs close to
+// edge-on to the camera, which is the common case looking down a street:
+// the near end of the wall can be far closer than the quad's midpoint
+// suggests, so a car standing right in front of that near end can get
+// sorted as if it were behind the wall and painted first, reading as the
+// car driving in front of a building that's actually nearer. Splitting the
+// wall into shorter segments, each with its own centroid, keeps every
+// segment's approximation close to its own true distance instead of one
+// number trying to speak for the whole span.
+function facePlaneSegments(faceAxis, constVal, a0, a1, y0, y1, maxLen){
+  const segs = [];
+  const len = a1 - a0;
+  const n = Math.max(1, Math.ceil(len / maxLen));
+  for(let i=0;i<n;i++){
+    const s0 = a0 + len*i/n, s1 = a0 + len*(i+1)/n;
+    segs.push(facePlanePts(faceAxis, constVal, s0, s1, y0, y1));
+  }
+  return segs;
+}
+
 // chasing-light palettes for the three club flavors — cycles per-window
 // with a phase offset across the grid so it reads as lights running
 // across the face rather than all flashing in sync. Dance gets the fast
@@ -3815,27 +3844,36 @@ function updateWindowFlicker(dt){
   }
 }
 
+const WALL_SEGMENT_MAX_LEN = 70; // see facePlaneSegments
 function buildingFaces(b, cam, near){
   const faces = [];
   const tint = b.tint;
-  // side facing camera on x axis
+  // side facing camera on x axis -- each wall panel is chopped into
+  // shorter segments (facePlaneSegments) purely so its depth-sort key
+  // tracks the wall's real distance along its length instead of one
+  // centroid for the whole span; the window/door overlay on top of it
+  // still uses the full span for placement and keeps its own shared depth
   if(cam.x < b.x1){
-    const pts = [[b.x1,0,b.z1],[b.x1,b.h,b.z1],[b.x1,b.h,b.z2],[b.x1,0,b.z2]];
-    faces.push({pts, color: shadeColor(tint, b.shade*0.85)});
-    if(near) faces.push(...buildingWindows(b, 'x', b.x1, b.z1, b.z2, faceDepth(pts, cam)));
+    const full = [[b.x1,0,b.z1],[b.x1,b.h,b.z1],[b.x1,b.h,b.z2],[b.x1,0,b.z2]];
+    const color = shadeColor(tint, b.shade*0.85);
+    for(const pts of facePlaneSegments('x', b.x1, b.z1, b.z2, 0, b.h, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color});
+    if(near) faces.push(...buildingWindows(b, 'x', b.x1, b.z1, b.z2, faceDepth(full, cam)));
   } else if(cam.x > b.x2){
-    const pts = [[b.x2,0,b.z2],[b.x2,b.h,b.z2],[b.x2,b.h,b.z1],[b.x2,0,b.z1]];
-    faces.push({pts, color: shadeColor(tint, b.shade*0.85)});
-    if(near) faces.push(...buildingWindows(b, 'x', b.x2, b.z1, b.z2, faceDepth(pts, cam)));
+    const full = [[b.x2,0,b.z2],[b.x2,b.h,b.z2],[b.x2,b.h,b.z1],[b.x2,0,b.z1]];
+    const color = shadeColor(tint, b.shade*0.85);
+    for(const pts of facePlaneSegments('x', b.x2, b.z2, b.z1, 0, b.h, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color});
+    if(near) faces.push(...buildingWindows(b, 'x', b.x2, b.z1, b.z2, faceDepth(full, cam)));
   }
   if(cam.z < b.z1){
-    const pts = [[b.x2,0,b.z1],[b.x2,b.h,b.z1],[b.x1,b.h,b.z1],[b.x1,0,b.z1]];
-    faces.push({pts, color: shadeColor(tint, b.shade*1.05)});
-    if(near) faces.push(...buildingWindows(b, 'z', b.z1, b.x1, b.x2, faceDepth(pts, cam)));
+    const full = [[b.x2,0,b.z1],[b.x2,b.h,b.z1],[b.x1,b.h,b.z1],[b.x1,0,b.z1]];
+    const color = shadeColor(tint, b.shade*1.05);
+    for(const pts of facePlaneSegments('z', b.z1, b.x2, b.x1, 0, b.h, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color});
+    if(near) faces.push(...buildingWindows(b, 'z', b.z1, b.x1, b.x2, faceDepth(full, cam)));
   } else if(cam.z > b.z2){
-    const pts = [[b.x1,0,b.z2],[b.x1,b.h,b.z2],[b.x2,b.h,b.z2],[b.x2,0,b.z2]];
-    faces.push({pts, color: shadeColor(tint, b.shade*1.05)});
-    if(near) faces.push(...buildingWindows(b, 'z', b.z2, b.x1, b.x2, faceDepth(pts, cam)));
+    const full = [[b.x1,0,b.z2],[b.x1,b.h,b.z2],[b.x2,b.h,b.z2],[b.x2,0,b.z2]];
+    const color = shadeColor(tint, b.shade*1.05);
+    for(const pts of facePlaneSegments('z', b.z2, b.x1, b.x2, 0, b.h, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color});
+    if(near) faces.push(...buildingWindows(b, 'z', b.z2, b.x1, b.x2, faceDepth(full, cam)));
   }
   if(cam.y < b.h){
     faces.push({pts:[[b.x1,b.h,b.z1],[b.x2,b.h,b.z1],[b.x2,b.h,b.z2],[b.x1,b.h,b.z2]], color: shadeColor(tint, b.shade*1.15)});
