@@ -1268,8 +1268,9 @@ function spawnPlayerStart(){
   // without this the car spawns dead-center on the street (laneOffset
   // defaults to 0) and visibly slides into lane 1 over the first half
   // second, before the player has touched a key
-  car.laneOffset = LANE_OFFSET;
-  car.x = x + LANE_OFFSET;
+  const spawnOff = laneCenterOffset(car.lane, laneCountAt('z', x));
+  car.laneOffset = spawnOff;
+  car.x = x + spawnOff;
   car.y = 0; car.vy = 0; car.airborne = false;
   car.carPark = null; car.carParkLastDepth = -Infinity;
   car.hazardSlowT = 0; car.hazardSlowFloor = 0;
@@ -1416,6 +1417,21 @@ function laneCountAt(axis, lineValue){
   return (idx>=0 && rh[idx]===ROAD_HALF_ARTERIAL) ? ARTERIAL_LANES_PER_SIDE : 1;
 }
 
+// physical lateral offset (from the street centerline) for a car sitting
+// in `lane` (a signed index from correctLane/snapToLane) on a street with
+// `laneCount` through-lanes per side. A minor street's single lane just
+// hugs LANE_OFFSET off-center. An arterial's lanes sit directly against
+// each other with no gap -- lane 1 spans [0,LANE_OFFSET] from the
+// centerline, lane 2 spans [LANE_OFFSET,2*LANE_OFFSET], etc -- so each
+// lane's actual center (where the car should drive) is lane*LANE_OFFSET
+// minus half a lane width, not lane*LANE_OFFSET itself. Using the plain
+// multiple put cars dead-center ON the painted line between two lanes
+// instead of straddling the middle of either one.
+function laneCenterOffset(lane, laneCount){
+  if(laneCount<=1) return lane*LANE_OFFSET;
+  return (Math.abs(lane)-0.5)*LANE_OFFSET*Math.sign(lane);
+}
+
 // AI traffic used to drive dead-center down every street with no lane
 // offset at all — two cars passing each other looked like oncoming
 // traffic on the wrong side, because there was no side. This snaps a car
@@ -1428,7 +1444,7 @@ function snapToLane(car, lineX, lineZ){
   const laneCount = laneCountAt(car.axis, lineVal);
   const mag = laneCount<=1 ? 1 : 1+Math.floor(Math.random()*laneCount);
   car.lane = correctLane(car.axis, car.dir, lineVal) * mag;
-  const off = car.lane * LANE_OFFSET;
+  const off = laneCenterOffset(car.lane, laneCount);
   if(car.axis==='z'){ car.x = lineX + off; car.laneHome = car.x; }
   else { car.z = lineZ + off; car.laneHome = car.z; }
 }
@@ -2408,7 +2424,8 @@ function updatePlayer(dt){
   // at all and could drive straight into a roundabout, wedging against its
   // collision circle with no way to move forward again (only reversing
   // escaped it, which read as the car just freezing at a junction)
-  player.laneHome = player.streetCoord + player.lane * LANE_OFFSET;
+  const playerLaneCount = laneCountAt(player.axis, player.streetCoord);
+  player.laneHome = player.streetCoord + laneCenterOffset(player.lane, playerLaneCount);
   const avoid = (player.parkPad || player.carPark) ? 0 : obstacleAvoidOffset(player);
 
   // ease toward the target lane (exponential approach, fast at first and
@@ -2425,7 +2442,7 @@ function updatePlayer(dt){
   if(!player.arcTurn){
     const targetOffset = player.parkPad ? player.parkPad.cross
       : player.carPark ? player.carPark.entrance.cross
-      : (player.lane * LANE_OFFSET + avoid);
+      : (laneCenterOffset(player.lane, playerLaneCount) + avoid);
     const laneEase = 1 - Math.exp(-LANE_SPEED/LANE_OFFSET*dt);
     player.laneOffset += (targetOffset - player.laneOffset) * laneEase;
     if(Math.abs(targetOffset-player.laneOffset) < 0.05) player.laneOffset = targetOffset;
@@ -3285,7 +3302,7 @@ function spawnCarAtGarage(g){
   c.laneOffset = e.cross;
   if(e.axis === 'z'){ c.z = e.along; c.x = e.line + e.cross; }
   else { c.x = e.along; c.z = e.line + e.cross; }
-  c.laneHome = e.line + c.lane*LANE_OFFSET;
+  c.laneHome = e.line + laneCenterOffset(c.lane, laneCountAt(e.axis, e.line));
   civilians.push(c);
 }
 function despawnCarNearGarage(g){
