@@ -224,6 +224,11 @@ const BUILD_HALF = 250;            // building footprint half-size (leaves stree
 // genuinely harder to see into, not just darker-looking up close.
 const RENDER_DIST_DAY = 1550, RENDER_DIST_NIGHT = 620;
 let RENDER_DIST = RENDER_DIST_DAY;
+// how much of RENDER_DIST the distance fog covers (0 = a hard edge right
+// at RENDER_DIST, 1 = fog starts right at the camera) -- live-tunable
+// with [ and ] (see the keydown handler) rather than a fixed constant, so
+// the pop-in/haze tradeoff can be explored without editing code
+let FOG_BAND = 0.35;
 const NEAR = 4;
 const FOV_FOCAL = 260;
 const HORIZON_Y = 205;
@@ -1543,6 +1548,8 @@ window.addEventListener('keydown', e=>{
   if(k==='v' && !e.repeat) cycleCameraMode();
   if(k==='h' && !e.repeat) honk();
   if(k==='t' && !e.repeat) cycleRadio();
+  if(k==='[' && !e.repeat){ FOG_BAND = clamp(FOG_BAND-0.05, 0.05, 0.95); showBanner('FOG BAND: '+FOG_BAND.toFixed(2), 0.8); }
+  if(k===']' && !e.repeat){ FOG_BAND = clamp(FOG_BAND+0.05, 0.05, 0.95); showBanner('FOG BAND: '+FOG_BAND.toFixed(2), 0.8); }
   if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k)) e.preventDefault();
 });
 window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
@@ -6428,10 +6435,18 @@ function drawScene(){
   // player approached, reading as obvious pop-in rather than something
   // emerging from haze. f.depth is already the squared camera distance
   // every per-type cull check above also uses, so this needs no new
-  // per-object bookkeeping: faces in the outer FADE_BAND of RENDER_DIST
-  // just fade their own color/stroke alpha in as they get closer.
-  const FADE_BAND = 0.22;
-  const fadeStart = RENDER_DIST * (1-FADE_BAND);
+  // per-object bookkeeping: faces in the outer FOG_BAND of RENDER_DIST
+  // just blend their own color/stroke toward the sky's own horizon color
+  // (skyBottom, which already tracks time of day/weather) as they get
+  // farther away, rather than fading to transparent -- real haze
+  // desaturates things toward the sky color while staying opaque, it
+  // doesn't make them see-through, and blending all the way to the sky
+  // color means the final pop at the RENDER_DIST cull is barely visible
+  // since the object is already almost the same color as the backdrop
+  // behind it. FOG_BAND (how much of RENDER_DIST this covers) is live-
+  // tunable with [ and ] without touching RENDER_DIST itself -- see the
+  // keydown handler.
+  const fadeStart = RENDER_DIST * (1-FOG_BAND);
   const fadeSpan = RENDER_DIST - fadeStart;
   for(const f of allFaces){
     const proj = projectFace(f.pts, cam);
@@ -6440,8 +6455,8 @@ function drawScene(){
     if(color && !color.glow){
       const dist = Math.sqrt(f.depth);
       if(dist > fadeStart){
-        const t = clamp(1 - (dist-fadeStart)/fadeSpan, 0, 1);
-        if(t < 0.999){ color = fadeColor(color, t); stroke = fadeColor(stroke, t); }
+        const t = clamp((dist-fadeStart)/fadeSpan, 0, 1);
+        if(t > 0.001){ color = fogBlendColor(color, t); stroke = fogBlendColor(stroke, t); }
       }
     }
     polyFill(proj, color, stroke, f.width);
@@ -6555,13 +6570,16 @@ function faceDepth(pts, cam){
 // used to fade distant faces in near RENDER_DIST (see the draw loop).
 // Anything that isn't a parseable color string (null stroke, etc.) is
 // returned unchanged rather than guessed at.
-function fadeColor(color, alpha){
+// blends a color toward the sky's own horizon tint (skyBottom) by `t`
+// (0 = unchanged, 1 = fully the sky color) -- see the allFaces fog pass
+function fogBlendColor(color, t){
   if(!color || typeof color !== 'string') return color;
   const m = color.match(/rgba?\(([^)]+)\)/);
   if(!m) return color;
   const parts = m[1].split(',').map(s => parseFloat(s));
   const a = parts.length > 3 ? parts[3] : 1;
-  return `rgba(${parts[0]},${parts[1]},${parts[2]},${(a*alpha).toFixed(3)})`;
+  const mixed = lerpColor3([parts[0],parts[1],parts[2]], skyBottom, t);
+  return `rgba(${mixed[0].toFixed(1)},${mixed[1].toFixed(1)},${mixed[2].toFixed(1)},${a.toFixed(3)})`;
 }
 
 function drawMinimap(){
