@@ -393,7 +393,13 @@ const ROAD_HALF_ARTERIAL = ARTERIAL_DRIVABLE_HALF + 20; // + sidewalk & margin
 // bleed into an unrelated nearby street.
 const JUNCTION_CROSS_TOLERANCE = 54;
 const TL_CYCLE = 7, TL_AMBER = 1.2, TL_GAP = 1.5; // traffic-light phase timing (seconds) — TL_GAP also doubles as the red-amber duration
-const TL_STOP_WINDOW = 26;         // how far ahead of a red/amber light traffic stops
+// how far ahead of the real stop line traffic starts easing down for a
+// red/amber light, closed crossing or stop sign. Needs enough room for the
+// fastest AI traffic (motorbikes, ~180) to actually decelerate to 0 at the
+// game's braking rate (220/s^2, stopping distance ~74) rather than just
+// freezing in place the instant it comes into range -- see updateStreetCar.
+const TL_STOP_WINDOW = 90;
+const STOP_ARRIVE_TOL = 3; // how close to the real line counts as "stopped there" for the stop-sign dwell
 const SIGN_TYPES = ['stop','give_way','speed','direction'];
 const BILLBOARD_SLOGANS = [
   "DON'T PANIC",
@@ -2821,16 +2827,58 @@ function obstacleAvoidOffset(car){
 function updateStreetCar(car, dt){
   if(checkOilSlick(car, dt)){ car.braking = true; return; }
   const exempt = car.fleeing || car.type==='ambulance' || car.type==='firetruck';
-  if(!exempt && (redLightAhead(car) || levelCrossingBlocked(car))){ car.braking = true; return; }
+
+  // A required stop (red light, stop sign, level crossing) used to hard-
+  // freeze the car's position the instant it came within a small trigger
+  // window of the junction's own CENTER point -- not the actual painted
+  // stop line, which sits a whole crossing-road's-half-width further back.
+  // That meant traffic blew straight through the painted line at full
+  // speed and only froze deep inside the junction box itself (often past
+  // the very cross-traffic it was supposed to be yielding to). It also
+  // froze car.speed at whatever it was cruising at, so release was an
+  // instant jump back to full speed with no run-up at all -- together
+  // reading as "stop, think, teleport off" rather than a car actually
+  // slowing down and pulling away. requiredStopDist now feeds into the
+  // same speed-target/braking pipeline as ordinary traffic-ahead braking
+  // below (see speedTarget), so a car still always stops at the real
+  // line, but eases down to get there and accelerates back up from an
+  // actual standstill, same as it does for a car ahead of it.
+  let requiredStopDist = Infinity;
   if(!exempt){
-    const ssKey = stopSignAhead(car);
-    if(ssKey){
-      car.braking = true;
-      car.stopDwell = (car.stopDwell||0) + dt;
-      if(car.stopDwell < STOP_SIGN_DWELL) return;
-      car.stopSignCleared = ssKey;
-      car.stopDwell = 0;
+    const rl = redLightStopDist(car);
+    if(rl !== null) requiredStopDist = Math.min(requiredStopDist, rl);
+    const lc = levelCrossingStopDist(car);
+    if(lc !== null) requiredStopDist = Math.min(requiredStopDist, lc);
+    const ss = stopSignAhead(car);
+    if(ss && !ss.cleared){
+      requiredStopDist = Math.min(requiredStopDist, ss.dist);
+      // only counts as "stopped and waiting" once actually at the line
+      // and essentially at rest there, not merely somewhere in the
+      // (now much longer) braking approach
+      if(ss.dist < STOP_ARRIVE_TOL && Math.abs(car.speed) < 3){
+        car.stopDwell = (car.stopDwell||0) + dt;
+        if(car.stopDwell >= STOP_SIGN_DWELL){
+          car.stopSignCleared = ss.key;
+          car.stopDwell = 0;
+        }
+      } else {
+        car.stopDwell = 0;
+      }
     }
+  }
+  // Once genuinely at rest right at a required stop (not merely somewhere
+  // in the braking approach), there's nothing left for this frame to
+  // decide -- the car isn't going anywhere until the light changes or the
+  // stop-sign dwell above completes, both of which are already re-checked
+  // every frame by the cheap (O(signs+lights), not O(all traffic)) block
+  // above. Skipping the rest -- in particular the O(n) scan over every
+  // other car below -- matters a lot in practice, since stop signs sit at
+  // the large majority of this city's junctions and a meaningful fraction
+  // of traffic is sitting at one at any given moment.
+  if(requiredStopDist <= STOP_ARRIVE_TOL && Math.abs(car.speed) < 3){
+    car.speed = 0;
+    car.braking = true;
+    return;
   }
   car.braking = !!car.donutBreak;
 
@@ -2853,7 +2901,12 @@ function updateStreetCar(car, dt){
   const crossPos = car.laneHome + avoid;
   const forward = car.axis==='z' ? car.z : car.x;
   const BRAKE_DIST = 90, MIN_GAP = 20;
-  let speedTarget = car.maxSpeed;
+  // ease toward 0 over the same distance scale as ordinary car-ahead
+  // braking, so a required stop and a slow car ahead feel like the same
+  // kind of braking rather than two different behaviors
+  let speedTarget = requiredStopDist < Infinity
+    ? car.maxSpeed * clamp(requiredStopDist/TL_STOP_WINDOW, 0, 1)
+    : car.maxSpeed;
   let nearestAhead = Infinity, nearestIsPlayer = false;
   const checkAhead = (other) => {
     if(!other || other === car) return;
@@ -2871,7 +2924,7 @@ function updateStreetCar(car, dt){
   for(const other of allTraffic()) checkAhead(other);
   if(nearestAhead < BRAKE_DIST){
     const frac = clamp((nearestAhead-MIN_GAP)/(BRAKE_DIST-MIN_GAP), 0, 1);
-    speedTarget = car.maxSpeed * frac;
+    speedTarget = Math.min(speedTarget, car.maxSpeed * frac);
     // an actual crash (sound + hard stop), only against the player —
     // two AI cars following closely is just normal traffic flow (a queue
     // at a stop sign, merging in), not a crash every time it happens, and
@@ -3148,43 +3201,56 @@ function trafficPhase(axis, t){
   return 'redamber';
 }
 
-function redLightAhead(car){
+// Distance from `car` to the junction's real painted stop line, not its
+// center point -- the stop line sits one crossing-road's-half-width short
+// of center (see where stopLines/stopSignLines are painted, above). Every
+// light-controlled junction is arterial x arterial by construction, so
+// the crossing road is always ROAD_HALF_ARTERIAL wide regardless of which
+// approach this is. Returns null if this car isn't currently required to
+// stop here (too far away, or the light is green).
+function redLightStopDist(car){
   const axis = car.axis, dir = car.dir;
   const forward = axis==='z' ? car.z : car.x;
   const cross = axis==='z' ? car.x : car.z;
   for(const tl of trafficLights){
-    const lineCoord = axis==='z' ? tl.z : tl.x;
+    const centerCoord = axis==='z' ? tl.z : tl.x;
     const crossCoord = axis==='z' ? tl.x : tl.z;
     if(Math.abs(cross-crossCoord) > JUNCTION_CROSS_TOLERANCE) continue;
-    const distToLine = dir>0 ? (lineCoord-forward) : (forward-lineCoord);
-    if(distToLine > 0 && distToLine < TL_STOP_WINDOW){
-      return trafficPhase(axis, worldTime) !== 'green';
+    const stopLineCoord = centerCoord - dir*ROAD_HALF_ARTERIAL;
+    const distToLine = dir>0 ? (stopLineCoord-forward) : (forward-stopLineCoord);
+    if(distToLine > -STOP_ARRIVE_TOL && distToLine < TL_STOP_WINDOW && trafficPhase(axis, worldTime) !== 'green'){
+      return Math.max(0, distToLine);
     }
   }
-  return false;
+  return null;
 }
 
-const STOP_SIGN_WINDOW = 22, STOP_SIGN_DWELL = 1.1;
+const STOP_SIGN_WINDOW = TL_STOP_WINDOW, STOP_SIGN_DWELL = 1.1;
 // a stop sign has no "phase" to wait out like a light does, so each car
 // remembers (car.stopSignCleared) which specific junction+axis it already
 // sat through, and only has to wait there once per approach — otherwise
 // it'd never pull away from a junction it's still within STOP_SIGN_WINDOW
 // of. Clears back to null the moment no stop sign is nearby, so looping
 // back around the block later asks it to stop again like anyone else.
+// Same real-stop-line correction as redLightStopDist above: the line sits
+// perpRoadHalf (the CROSSING street's own half-width, which can differ
+// from this street's own width at an asymmetric arterial/minor junction)
+// short of the junction center, not at the center itself.
 function stopSignAhead(car){
   const axis = car.axis, dir = car.dir;
   const forward = axis==='z' ? car.z : car.x;
   const cross = axis==='z' ? car.x : car.z;
   for(const ss of stopSigns){
     if(!ss.stopAxes.includes(axis)) continue;
-    const lineCoord = axis==='z' ? ss.z : ss.x;
+    const centerCoord = axis==='z' ? ss.z : ss.x;
     const crossCoord = axis==='z' ? ss.x : ss.z;
     if(Math.abs(cross-crossCoord) > JUNCTION_CROSS_TOLERANCE) continue;
-    const distToLine = dir>0 ? (lineCoord-forward) : (forward-lineCoord);
-    if(distToLine > 0 && distToLine < STOP_SIGN_WINDOW){
+    const perpRoadHalf = axis==='z' ? ss.rhZ : ss.rhX;
+    const stopLineCoord = centerCoord - dir*perpRoadHalf;
+    const distToLine = dir>0 ? (stopLineCoord-forward) : (forward-stopLineCoord);
+    if(distToLine > -STOP_ARRIVE_TOL && distToLine < STOP_SIGN_WINDOW){
       const key = ss.x+','+ss.z+','+axis;
-      if(car.stopSignCleared === key) return null;
-      return key;
+      return { key, dist: Math.max(0, distToLine), cleared: car.stopSignCleared === key };
     }
   }
   if(car.stopSignCleared) car.stopSignCleared = null;
@@ -3203,11 +3269,18 @@ function levelCrossingState(t){
   q -= LC_CLOSED;
   return {phase:'raising', barrierT:1-q/LC_RAISE, trainT:1};
 }
-function levelCrossingBlocked(car){
-  if(car.axis !== 'z' || Math.abs(car.x-levelCrossing.x) > JUNCTION_CROSS_TOLERANCE) return false;
-  if(levelCrossingState(worldTime).phase === 'open') return false;
-  const distToLine = car.dir>0 ? (levelCrossing.z-car.z) : (car.z-levelCrossing.z);
-  return distToLine > 0 && distToLine < TL_STOP_WINDOW;
+// the barrier itself (buildLevelCrossingBarriers) sits 16 units out from
+// the crossing's own center on each side -- same real-stop-point
+// correction as redLightStopDist/stopSignAhead above, just with a fixed
+// setback instead of a per-street road-half, since a level crossing is a
+// single point, not a road-width junction box
+const LEVEL_CROSSING_BARRIER_SETBACK = 16;
+function levelCrossingStopDist(car){
+  if(car.axis !== 'z' || Math.abs(car.x-levelCrossing.x) > JUNCTION_CROSS_TOLERANCE) return null;
+  if(levelCrossingState(worldTime).phase === 'open') return null;
+  const stopLineCoord = car.dir>0 ? (levelCrossing.z-LEVEL_CROSSING_BARRIER_SETBACK) : (levelCrossing.z+LEVEL_CROSSING_BARRIER_SETBACK);
+  const distToLine = car.dir>0 ? (stopLineCoord-car.z) : (car.z-stopLineCoord);
+  return (distToLine > -STOP_ARRIVE_TOL && distToLine < TL_STOP_WINDOW) ? Math.max(0, distToLine) : null;
 }
 
 const CLUB_AUDIO_RADIUS = 230;
@@ -3863,13 +3936,30 @@ const CLUB_PALETTES = {dance:{colors:DISCO_COLORS, speed:4}, rock:{colors:ROCK_C
 // during a turn. Pinning the window's sort depth to its wall's own depth
 // (minus a hair) settles the tie without disturbing how the window sorts
 // against everything else in the scene.
-function buildingWindows(b, faceAxis, constVal, lo, hi, wallDepth){
+function buildingWindows(b, faceAxis, constVal, lo, hi, cam){
   const quads = [];
-  const depthOverride = wallDepth - 1;
   const span = hi - lo;
   const inset = 16;
   const usable = span - inset*2;
   const cols = b.cols;
+
+  // match the wall's own segmentation (facePlaneSegments/WALL_SEGMENT_MAX_LEN
+  // just below) instead of one shared depth for the whole face -- a long
+  // wall's near end can be much closer to the camera than its far end, and
+  // pinning every window on it to a single averaged depth let a window near
+  // the close end sort BEHIND that nearer wall segment and vanish entirely,
+  // or a window near the far end "win" a sort it shouldn't and poke through.
+  // Windows within the same segment still share one depth (the original
+  // reason depthOverride exists at all -- see below), so this keeps that
+  // anti-flicker property local instead of city-wide.
+  const segN = Math.max(1, Math.ceil(Math.abs(span) / WALL_SEGMENT_MAX_LEN));
+  const segDepths = [];
+  for(let i=0;i<segN;i++){
+    const s0 = lo + span*i/segN, s1 = lo + span*(i+1)/segN;
+    segDepths.push(faceDepth(facePlanePts(faceAxis, constVal, s0, s1, 0, b.h), cam) - 1);
+  }
+  const depthFor = (pos) => segDepths[clamp(Math.floor((pos-lo)/span*segN), 0, segN-1)];
+
   if(usable > 0 && cols > 0){
     const ww = Math.min(11, usable/cols*0.52);
     const gap = cols > 1 ? (usable - ww*cols)/(cols-1) : 0;
@@ -3890,13 +3980,13 @@ function buildingWindows(b, faceAxis, constVal, lo, hi, wallDepth){
           const lit = row && row[c];
           color = lit ? 'rgba(232,202,120,0.92)' : 'rgba(52,58,64,0.9)';
         }
-        quads.push({pts: facePlanePts(faceAxis, constVal, pos, pos+ww, y0, y1), color, depthOverride});
+        quads.push({pts: facePlanePts(faceAxis, constVal, pos, pos+ww, y0, y1), color, depthOverride: depthFor(pos)});
       }
     }
   }
   const doorW = 12, doorH = 21;
   const doorPos = lo + span/2 - doorW/2;
-  quads.push({pts: facePlanePts(faceAxis, constVal, doorPos, doorPos+doorW, 0, doorH), color:'rgba(38,34,32,0.95)', depthOverride});
+  quads.push({pts: facePlanePts(faceAxis, constVal, doorPos, doorPos+doorW, 0, doorH), color:'rgba(38,34,32,0.95)', depthOverride: depthFor(doorPos)});
   return quads;
 }
 
@@ -3923,29 +4013,27 @@ function buildingFaces(b, cam, near){
   // side facing camera on x axis -- each wall panel is chopped into
   // shorter segments (facePlaneSegments) purely so its depth-sort key
   // tracks the wall's real distance along its length instead of one
-  // centroid for the whole span; the window/door overlay on top of it
-  // still uses the full span for placement and keeps its own shared depth
+  // centroid for the whole span; the window/door overlay (buildingWindows)
+  // now segments its own depth the same way, so a window shares its sort
+  // key with the actual wall segment behind it rather than one average for
+  // the whole face
   if(cam.x < b.x1){
-    const full = [[b.x1,0,b.z1],[b.x1,b.h,b.z1],[b.x1,b.h,b.z2],[b.x1,0,b.z2]];
     const color = shadeColor(tint, b.shade*0.85);
     for(const pts of facePlaneSegments('x', b.x1, b.z1, b.z2, 0, b.h, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color});
-    if(near) faces.push(...buildingWindows(b, 'x', b.x1, b.z1, b.z2, faceDepth(full, cam)));
+    if(near) faces.push(...buildingWindows(b, 'x', b.x1, b.z1, b.z2, cam));
   } else if(cam.x > b.x2){
-    const full = [[b.x2,0,b.z2],[b.x2,b.h,b.z2],[b.x2,b.h,b.z1],[b.x2,0,b.z1]];
     const color = shadeColor(tint, b.shade*0.85);
     for(const pts of facePlaneSegments('x', b.x2, b.z2, b.z1, 0, b.h, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color});
-    if(near) faces.push(...buildingWindows(b, 'x', b.x2, b.z1, b.z2, faceDepth(full, cam)));
+    if(near) faces.push(...buildingWindows(b, 'x', b.x2, b.z1, b.z2, cam));
   }
   if(cam.z < b.z1){
-    const full = [[b.x2,0,b.z1],[b.x2,b.h,b.z1],[b.x1,b.h,b.z1],[b.x1,0,b.z1]];
     const color = shadeColor(tint, b.shade*1.05);
     for(const pts of facePlaneSegments('z', b.z1, b.x2, b.x1, 0, b.h, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color});
-    if(near) faces.push(...buildingWindows(b, 'z', b.z1, b.x1, b.x2, faceDepth(full, cam)));
+    if(near) faces.push(...buildingWindows(b, 'z', b.z1, b.x1, b.x2, cam));
   } else if(cam.z > b.z2){
-    const full = [[b.x1,0,b.z2],[b.x1,b.h,b.z2],[b.x2,b.h,b.z2],[b.x2,0,b.z2]];
     const color = shadeColor(tint, b.shade*1.05);
     for(const pts of facePlaneSegments('z', b.z2, b.x1, b.x2, 0, b.h, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color});
-    if(near) faces.push(...buildingWindows(b, 'z', b.z2, b.x1, b.x2, faceDepth(full, cam)));
+    if(near) faces.push(...buildingWindows(b, 'z', b.z2, b.x1, b.x2, cam));
   }
   if(cam.y < b.h){
     faces.push({pts:[[b.x1,b.h,b.z1],[b.x2,b.h,b.z1],[b.x2,b.h,b.z2],[b.x1,b.h,b.z2]], color: shadeColor(tint, b.shade*1.15)});
@@ -6169,7 +6257,25 @@ function drawScene(){
     // real, measurable frame cost for cars nobody could see anyway.
     if(car!==player && dist2(cam.x,cam.z,car.x,car.z) > RENDER_DIST*RENDER_DIST) continue;
     for(const f of buildVehicleQuads(car)){
-      allFaces.push({pts:f.pts, color:f.color, stroke:(f.color&&f.color.glow)?null:carStroke, width:1, depth:faceDepth(f.pts, cam) + (f.depthBias||0)});
+      // The imported high-poly models (sports car, big rig) carry hundreds
+      // of small body-panel facets from the original mesh, many of them
+      // genuinely near-coplanar (a curved hood or fender broken into many
+      // adjoining pieces) or sharing a seam that doesn't line up to the
+      // last bit of floating-point precision. Sorting every one of those
+      // by its own raw centroid distance -- the same per-face approach
+      // already replaced for wheels (dropped entirely) and building
+      // windows (shared per-wall-segment depth, see buildingWindows) --
+      // lets a car's own panels swap draw order from one frame to the
+      // next on nothing more than sub-unit camera jitter, reading as the
+      // body flickering between two slightly different shades right at a
+      // panel seam. Rounding to a coarse bucket means two facets that are
+      // genuinely close together land in the same bucket and keep a
+      // stable order run to run, while panels meaningfully apart (several
+      // units, the common case) are far enough apart to land in different
+      // buckets and still sort correctly.
+      const DEPTH_BUCKET = 4;
+      const depth = Math.round((faceDepth(f.pts, cam) + (f.depthBias||0))/DEPTH_BUCKET)*DEPTH_BUCKET;
+      allFaces.push({pts:f.pts, color:f.color, stroke:(f.color&&f.color.glow)?null:carStroke, width:1, depth});
     }
   }
   for(const bu of bullets){
