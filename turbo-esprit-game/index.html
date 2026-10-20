@@ -2684,11 +2684,18 @@ function collideBuildings(x, z, r){
 // straight, not blocking a turn or its lane-settle tail. No fixed gap
 // width around every junction can outrun this reliably at every speed, so
 // the player skips median collision for the whole arc plus a short settle
-// window after it (player.turnSettleT) instead — buildings/garages/
-// roundabouts stay fully solid throughout.
+// window after it (player.turnSettleT) instead — buildings/garages stay
+// fully solid throughout. A mini-roundabout sitting at one of the handful
+// of junctions that has one is the same story, only more so: it sits
+// exactly at the pivot point the arc sweeps closest to, where
+// obstacleAvoidOffset's steer-around nudge doesn't apply either (it's only
+// used for straight-line lane easing, not during the arc). The arc used to
+// clip it — "a grey rod in the middle of the junction that turning hits" —
+// even though a real UK mini-roundabout is specifically a low, mountable
+// island that larger vehicles are expected to drive over, not a wall.
 function collideWorld(x, z, r, ignoreMedians){
   if(collideBuildings(x,z,r)) return true;
-  if(ROUNDABOUTS_ENABLED){
+  if(ROUNDABOUTS_ENABLED && !ignoreMedians){
     for(const rb of roundabouts){
       if(dist2(x,z,rb.x,rb.z) < (rb.r+r)*(rb.r+r)) return true;
     }
@@ -2907,7 +2914,8 @@ function updateStreetCar(car, dt){
   let speedTarget = requiredStopDist < Infinity
     ? car.maxSpeed * clamp(requiredStopDist/TL_STOP_WINDOW, 0, 1)
     : car.maxSpeed;
-  let nearestAhead = Infinity, nearestIsPlayer = false;
+  let nearestAhead = Infinity, nearestIsPlayer = false, nearestLateralGap = Infinity;
+  const ownHalfWidth = (VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car)[0];
   const checkAhead = (other) => {
     if(!other || other === car) return;
     const oForward = car.axis==='z' ? other.z : other.x;
@@ -2917,6 +2925,7 @@ function updateStreetCar(car, dt){
     if(aheadDist > 0 && aheadDist < BRAKE_DIST && lateralGap < 13 && aheadDist < nearestAhead){
       nearestAhead = aheadDist;
       nearestIsPlayer = other === player;
+      nearestLateralGap = lateralGap;
     }
   };
   checkAhead(player);
@@ -2929,8 +2938,26 @@ function updateStreetCar(car, dt){
     // two AI cars following closely is just normal traffic flow (a queue
     // at a stop sign, merging in), not a crash every time it happens, and
     // only a genuine "couldn't stop in time" case against the PLAYER
-    // (well inside the car's stopping distance) should end in one
-    if(nearestIsPlayer && nearestAhead < MIN_GAP*0.6 && car.crashCooldown<=0){
+    // (well inside the car's stopping distance) should end in one.
+    // The 13-unit lateralGap above is a generous "roughly in my lane"
+    // tolerance meant for easing off speed behind a queue -- it's wider
+    // than the gap between two adjacent lanes' centers in places, so a
+    // player legitimately overtaking in the next lane over (or the
+    // oncoming lane on a narrow two-lane street) reads as "dead ahead"
+    // for a moment right as they draw level, with aheadDist near zero —
+    // exactly when this used to fire a crash despite the cars never
+    // actually touching. A real crash needs the two vehicles' bodies to
+    // actually be able to overlap, not just share a generous lane-ish
+    // band, so the hard-stop check uses each vehicle's own width instead.
+    // a small INWARD buffer (not an added margin) -- bodies need to
+    // actually overlap by a bit, not just have their edges meet, since
+    // two ordinary cars centered in adjacent lanes one lane-width (16)
+    // apart have barely a unit of clearance between their edges at all;
+    // padding the tolerance out instead of in kept flagging that normal,
+    // lane-respecting pass as a collision
+    const playerHalfWidth = (VEHICLE_FOOTPRINT[player.type] || VEHICLE_FOOTPRINT.car)[0];
+    const bodyOverlapTol = ownHalfWidth + playerHalfWidth - 1.5;
+    if(nearestIsPlayer && nearestAhead < MIN_GAP*0.6 && nearestLateralGap < bodyOverlapTol && car.crashCooldown<=0){
       SFX.crash();
       car.crashCooldown = 1.5;
       speedTarget = 0;
