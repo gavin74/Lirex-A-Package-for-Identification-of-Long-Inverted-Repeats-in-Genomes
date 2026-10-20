@@ -293,6 +293,15 @@ const SUSPICION_RANGE = SPOT_RADIUS;
 const SUSPICION_RATE = 0.8;        // suspicion/sec at point-blank range, matched speed
 const SUSPICION_RATE_FAST = 1.7;   // suspicion/sec at point-blank range, closing faster than them
 const SUSPICION_DECAY = 0.9;       // suspicion/sec drained once you're back outside SUSPICION_RANGE
+// A chase that can only ever end in a bust has no real stakes -- fall far
+// enough behind a fleeing suspect for long enough and they can duck into
+// whichever garage they're passing and disappear for good, the same way a
+// civilian pulls in for the night. ESCAPE_LOST_RANGE is deliberately well
+// past SUSPICION_RANGE (losing sight of them has to mean actually losing
+// them, not just dropping out of spotting distance for a moment);
+// ESCAPE_LOST_TIME has to hold continuously, so a brief gap while they're
+// out of view around a corner doesn't cost the round.
+const ESCAPE_LOST_RANGE = 380, ESCAPE_LOST_TIME = 7, ESCAPE_GARAGE_RADIUS = 70;
 const HAZARD_COOLDOWN = 1.0;       // min seconds between hazard penalties, so lingering near
                                     // one doesn't reapply the penalty every single frame
 // roadworks-ramp jump physics — a simple vertical hop, not real rigid-body
@@ -3623,6 +3632,30 @@ function update(dt){
     } else {
       suspectSuspicion = Math.max(0, suspectSuspicion - SUSPICION_DECAY*dt);
     }
+  } else {
+    // fleeing and genuinely lost -- see ESCAPE_LOST_RANGE/TIME above
+    if(dist2(player.x,player.z,suspect.x,suspect.z) > ESCAPE_LOST_RANGE*ESCAPE_LOST_RANGE){
+      suspect.lostTimer = (suspect.lostTimer||0) + dt;
+    } else {
+      suspect.lostTimer = 0;
+    }
+    if(suspect.lostTimer > ESCAPE_LOST_TIME){
+      // a garage's OWN (x,z) is the building itself, set well back from
+      // the actual street (see spawnCarAtGarage/entrance.cross) -- a car
+      // actually driving the street is never near that point at all, only
+      // near where its entrance meets the road, so that's what a passing
+      // suspect's position has to be checked against instead.
+      const g = garages.find(g => {
+        const e = g.entrance;
+        const ex = e.axis==='x' ? e.along : e.line, ez = e.axis==='x' ? e.line : e.along;
+        return dist2(ex,ez,suspect.x,suspect.z) < ESCAPE_GARAGE_RADIUS*ESCAPE_GARAGE_RADIUS;
+      });
+      if(g){
+        g.phase = 'active'; g.doorOpen = 1; g.phaseT = 0.7;
+        showBanner('SUSPECT GAVE YOU THE SLIP', 1.3);
+        spawnSuspect();
+      }
+    }
   }
 
   if(dist2(player.x,player.z,suspect.x,suspect.z) < CATCH_RADIUS*CATCH_RADIUS
@@ -5892,8 +5925,17 @@ function updateRain(dt){
     // bottom of the screen
     const groundY = HORIZON_Y + (H-HORIZON_Y) * d.depth;
     if(d.y > groundY){
-      if(d.depth > 0.4 && Math.random() < 0.55){
-        d.splashT = 1; d.splashX = d.x; d.splashY = groundY;
+      // used to be a flat cutoff (depth>0.4) -- every splash below that
+      // line, none at all above it, which read as puddles stopping dead
+      // at one fixed row on screen instead of thinning out into the
+      // distance. Ramping the splash chance smoothly from 0 to 0.55 over
+      // depth 0..0.6 lets distant drops still splash sometimes, just
+      // rarely, with drawRain (below) shrinking and fading each splash by
+      // its own depth too so a far one reads as smaller and fainter
+      // rather than identical to a near one.
+      const splashChance = 0.55 * smoothstep(clamp(d.depth/0.6, 0, 1));
+      if(Math.random() < splashChance){
+        d.splashT = 1; d.splashX = d.x; d.splashY = groundY; d.splashDepth = d.depth;
       } else {
         Object.assign(d, spawnRainDrop(-20 - Math.random()*40));
       }
@@ -5914,9 +5956,10 @@ function drawRain(){
     const d = rainDrops[i];
     if(d.splashT > 0){
       const t = 1 - d.splashT;
-      const r = 2 + 7*t;
-      ctx.strokeStyle = `rgba(210,220,230,${(0.5*d.splashT).toFixed(3)})`;
-      ctx.lineWidth = 1;
+      const depthScale = 0.35 + 0.65*(d.splashDepth ?? 1);
+      const r = (2 + 7*t) * depthScale;
+      ctx.strokeStyle = `rgba(210,220,230,${(0.5*d.splashT*depthScale).toFixed(3)})`;
+      ctx.lineWidth = Math.max(0.5, depthScale);
       ctx.beginPath();
       ctx.ellipse(d.splashX, d.splashY, r, r*0.35, 0, 0, Math.PI*2);
       ctx.stroke();
