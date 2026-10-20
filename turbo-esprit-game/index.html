@@ -2867,8 +2867,52 @@ function obstacleAvoidOffset(car){
   return 0;
 }
 
+// AI traffic used to execute a turn by instantly reassigning axis/dir and
+// teleporting onto the new street (snapToLane) the instant it reached the
+// junction line -- an abrupt pivot-in-place that looked jarring once the
+// player's own turns became a smooth corner arc (see player.arcTurn in
+// updatePlayer), since the two now visibly disagreed about how a car goes
+// round a corner. armStreetCarTurn/updateStreetCarArc give traffic the
+// same continuous-arc model: axis/dir/lane/streetCoord all stay on the OLD
+// street until the arc actually finishes sweeping the full 90 degrees,
+// with heading and position integrated every frame in between exactly the
+// way the player's own arc works, just driven by the car's current speed
+// instead of player input.
+function armStreetCarTurn(car, nextAxis, nextDir, line){
+  const idx = cardinalIndex(car.axis, car.dir);
+  const nidx = cardinalIndex(nextAxis, nextDir);
+  const turnSign = nidx === (idx+1)%4 ? 1 : -1; // right turn : left turn (never called for "straight")
+  const laneCount = laneCountAt(nextAxis, line);
+  const mag = laneCount<=1 ? 1 : 1+Math.floor(Math.random()*laneCount);
+  const nextLane = correctLane(nextAxis, nextDir, line) * mag;
+  car.arcTurn = { turnSign, sweep:0, nextAxis, nextDir, nextLane, nextStreetCoord: line };
+}
+function updateStreetCarArc(car, dt){
+  const at = car.arcTurn;
+  // speed isn't updated during the arc (no braking/required-stop checks
+  // run -- the car is already committed to crossing the junction) so it
+  // simply carries whatever speed it had the instant the turn was armed
+  let dHeading = (car.speed / CORNER_RADIUS) * at.turnSign * dt;
+  const remaining = Math.PI/2 - at.sweep;
+  if(Math.abs(dHeading) > remaining) dHeading = remaining * (dHeading < 0 ? -1 : 1);
+  car.heading += dHeading;
+  at.sweep += Math.abs(dHeading);
+  const nx = car.x + Math.sin(car.heading)*car.speed*dt;
+  const nz = car.z + Math.cos(car.heading)*car.speed*dt;
+  car.x = nx; car.z = nz;
+  car.braking = false;
+  if(at.sweep >= Math.PI/2 - 1e-6){
+    car.axis = at.nextAxis; car.dir = at.nextDir; car.lane = at.nextLane; car.streetCoord = at.nextStreetCoord;
+    car.targetHeading = cardinalHeading(at.nextAxis, at.nextDir);
+    car.heading = car.targetHeading;
+    car.laneOffset = (at.nextAxis==='x' ? nz : nx) - car.streetCoord;
+    car.laneHome = car.streetCoord + laneCenterOffset(car.lane, laneCountAt(at.nextAxis, car.streetCoord));
+    car.arcTurn = null;
+  }
+}
 function updateStreetCar(car, dt){
   if(checkOilSlick(car, dt)){ car.braking = true; return; }
+  if(car.arcTurn){ updateStreetCarArc(car, dt); return; }
   const exempt = car.fleeing || car.type==='ambulance' || car.type==='firetruck';
 
   // A required stop (red light, stop sign, level crossing) used to hard-
@@ -3080,18 +3124,12 @@ function updateStreetCar(car, dt){
         if(best !== null && best !== idx){
           const next = CARDINALS[best];
           const goRight = best === (idx+1)%4;
-          car.axis = next.axis;
-          car.dir = next.dir;
-          car.targetHeading = cardinalHeading(next.axis, next.dir);
-          snapToLane(car, line, line);
+          armStreetCarTurn(car, next.axis, next.dir, line);
           setSignal(car, goRight ? 'right' : 'left', 1.0);
         }
       } else if(car.plannedTurn && car.plannedTurn.line === line){
         const next = car.plannedTurn;
-        car.axis = next.axis;
-        car.dir = next.dir;
-        car.targetHeading = cardinalHeading(next.axis, next.dir);
-        snapToLane(car, line, line);
+        armStreetCarTurn(car, next.axis, next.dir, line);
         car.plannedTurn = null;
         car.turnSignalPlannedFor = null;
       } else if(!car.fleeing && !car.chasing){
@@ -3604,11 +3642,11 @@ function update(dt){
   updateStreetCar(suspect, dt);
   for(const car of allTraffic()) updateStreetCar(car, dt);
 
-  // traffic's position always follows its discrete axis/dir (see
-  // updateStreetCar), so animating its visual heading here is purely
-  // cosmetic and can't cause any drift — it just turns the instant snap
-  // into a readable swing, same as the player already gets
-  for(const car of [suspect, ...allTraffic()]) approachHeading(car, dt, TURN_RATE);
+  // a car mid-corner-arc (see updateStreetCarArc) already drives its own
+  // heading directly every frame as part of the arc itself; easing it
+  // toward targetHeading here too would fight that, the same reason the
+  // player's own approachHeading call is skipped during player.arcTurn
+  for(const car of [suspect, ...allTraffic()]) if(!car.arcTurn) approachHeading(car, dt, TURN_RATE);
 
   for(const car of allCars()){
     if(car.signal && (car.signalTimer -= dt) <= 0) car.signal = null;
