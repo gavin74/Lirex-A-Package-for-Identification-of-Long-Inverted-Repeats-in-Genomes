@@ -1505,6 +1505,22 @@ function spawnSuspect(){
 
 function dist2(x1,z1,x2,z2){ const dx=x1-x2, dz=z1-z2; return dx*dx+dz*dz; }
 
+// A loud crash should draw the suspect's attention even from well outside
+// normal spotting range (SUSPICION_RANGE is built around a quiet car
+// creeping up unnoticed -- a crash is the opposite of quiet). Jumps
+// straight to fully spotted/fleeing rather than just nudging suspicion,
+// since a crash is a far louder tell than merely driving nearby.
+const CRASH_SPOOK_RADIUS = 260;
+function spookSuspectNear(x, z){
+  if(!suspect || suspect.fleeing) return;
+  if(dist2(x, z, suspect.x, suspect.z) < CRASH_SPOOK_RADIUS*CRASH_SPOOK_RADIUS){
+    suspectSuspicion = 1;
+    suspect.fleeing = true;
+    suspect.speed *= FLEE_SPEED_MULT;
+    showBanner('SPOTTED! PURSUIT!', 1.1);
+  }
+}
+
 // slab-method line-segment vs. axis-aligned box intersection, in the X-Z
 // ground plane — used to occlude billboard text behind buildings
 function segmentHitsBox(x0,z0,x1,z1, bx1,bx2,bz1,bz2){
@@ -2670,6 +2686,7 @@ function updatePlayer(dt){
       showBanner('CRASH!', 0.6);
       player.crashCooldown = 0.8;
       SFX.crash();
+      spookSuspectNear(player.x, player.z);
       shakeTimer = SHAKE_DURATION;
       if(damage >= 100 && gameState === 'playing'){
         gameState = 'over';
@@ -3039,6 +3056,7 @@ function updateStreetCar(car, dt){
     const bodyOverlapTol = ownHalfWidth + playerHalfWidth - 1.5;
     if(nearestIsPlayer && nearestAhead < MIN_GAP*0.6 && nearestLateralGap < bodyOverlapTol && car.crashCooldown<=0){
       SFX.crash();
+      spookSuspectNear(car.x, car.z);
       car.crashCooldown = 1.5;
       speedTarget = 0;
     }
@@ -3674,6 +3692,7 @@ function update(dt){
       showBanner(hit.label+'! -'+hit.penalty+' FUEL', 0.9);
       player.hazardCooldown = HAZARD_COOLDOWN;
       SFX.crash();
+      spookSuspectNear(player.x, player.z);
     }
   }
 
