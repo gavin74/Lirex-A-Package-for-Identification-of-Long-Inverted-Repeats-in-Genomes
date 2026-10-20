@@ -327,7 +327,14 @@ const CP_RAMP_END = 120;           // ramp climbs 0->CP_FLOOR_H over this span
 const CP_DECK_END = 190;           // flat upper deck; crossing this launches you
 const CP_LAUNCH_VY_MIN = 16, CP_LAUNCH_VY_MAX = 46;
 const LANE_OFFSET = 16;            // distance of each lane from the street centerline
-const LANE_SPEED = 70;             // lateral units/sec when changing lanes
+// was 70 -- at that rate, the exponential ease toward a new lane (see
+// laneEase below) takes a good quarter-second-plus to clear the
+// collision margin against a car you're passing (see collideWorld's
+// latMargin), which is real exposure time at speed: a late or last-
+// moment overtake could still be mid-shift, laterally too close, right
+// when you draw level with the car being passed, reading as "I got hit
+// even though I was overtaking". Faster lane changes shrink that window.
+const LANE_SPEED = 130;
 const TURN_RATE = 3.6;             // rad/sec every car's visual heading animates at —
                                     // slow enough that a turn clearly reads as motion
                                     // instead of snapping/blinking into the new heading
@@ -2780,9 +2787,12 @@ function collideWorld(x, z, r, ignoreMedians){
   // r-1.5 (7.5) still clipped in practice: two cars each holding that much
   // lateral margin only need a ~1-unit nudge (easing overshoot, a car
   // mid-lane-change) to overlap across the full 16-unit lane spacing.
-  // r-4 leaves real slack (worst case 10 of the 16 units) for ordinary
-  // driving noise instead of requiring pixel-perfect lane centering.
-  const longMargin = r+8, latMargin = r-4;
+  // r-4 still wasn't enough slack: a lane change in progress (see
+  // LANE_SPEED/laneEase) spends real time easing across that same 16
+  // units, and drawing level with the car being passed before it's
+  // finished reads as "hit despite overtaking cleanly". r-6 leaves more
+  // of the gap free for a change still mid-flight.
+  const longMargin = r+8, latMargin = r-6;
   for(const c of allTraffic()){
     const dx = x-c.x, dz = z-c.z;
     const along = c.axis==='z' ? Math.abs(dz) : Math.abs(dx);
@@ -6341,8 +6351,16 @@ function drawScene(){
   for(const cr of crossings){
     const d = dist2(cam.x,cam.z,cr.x,cr.z);
     if(d > RENDER_DIST*RENDER_DIST) continue;
-    const b1 = cr.axis==='z' ? {x:cr.x-cr.roadHalf+2, z:cr.z} : {x:cr.x, z:cr.z-cr.roadHalf+2};
-    const b2 = cr.axis==='z' ? {x:cr.x+cr.roadHalf-2, z:cr.z} : {x:cr.x, z:cr.z+cr.roadHalf-2};
+    // cr.axis is the axis pedestrians walk along (see where crossings are
+    // generated) -- the same axis buildZebraQuads lays its stripe sequence
+    // along, which is the road's WIDTH direction. The beacons stand at the
+    // two curbs, i.e. the extremes of that same walking axis, offset by
+    // cr.roadHalf -- this used to test the opposite axis value for each
+    // branch (swapped), offsetting along the road's LENGTH instead of its
+    // width, which put both beacons out in the middle of the carriageway
+    // a little way from the crossing rather than at either kerb.
+    const b1 = cr.axis==='x' ? {x:cr.x-cr.roadHalf+2, z:cr.z} : {x:cr.x, z:cr.z-cr.roadHalf+2};
+    const b2 = cr.axis==='x' ? {x:cr.x+cr.roadHalf-2, z:cr.z} : {x:cr.x, z:cr.z+cr.roadHalf-2};
     for(const bpos of [b1,b2]){
       for(const f of buildBeaconQuads(bpos.x, bpos.z)){
         allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
