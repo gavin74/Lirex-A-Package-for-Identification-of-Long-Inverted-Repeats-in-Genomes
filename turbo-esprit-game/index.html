@@ -4219,11 +4219,41 @@ function buildMedianQuads(m, cam){
 }
 const SIDEWALK_SIDE = 'rgb(140,136,128)', SIDEWALK_TOP = 'rgb(182,177,165)';
 const SIDEWALK_HEIGHT = 3.2; // was 1.6 -- too thin a step to read as a raised kerb
+const SIDEWALK_TOP2 = 'rgb(172,167,155)';
 function buildSidewalkQuads(sw, cam){
   // was 1.6 -- a real curb face at this world's scale (roads over 100
   // units wide, buildings 150+ tall), tall enough to read clearly as a
   // raised kerb rather than a painted line level with the road
-  return rectBoxFaces(sw.x1, sw.x2, sw.z1, sw.z2, 0, SIDEWALK_HEIGHT, cam, SIDEWALK_SIDE, SIDEWALK_TOP);
+  const faces = [];
+  if(cam.x < sw.x1) faces.push({pts:[[sw.x1,0,sw.z1],[sw.x1,SIDEWALK_HEIGHT,sw.z1],[sw.x1,SIDEWALK_HEIGHT,sw.z2],[sw.x1,0,sw.z2]], color:SIDEWALK_SIDE});
+  else if(cam.x > sw.x2) faces.push({pts:[[sw.x2,0,sw.z2],[sw.x2,SIDEWALK_HEIGHT,sw.z2],[sw.x2,SIDEWALK_HEIGHT,sw.z1],[sw.x2,0,sw.z1]], color:SIDEWALK_SIDE});
+  if(cam.z < sw.z1) faces.push({pts:[[sw.x2,0,sw.z1],[sw.x2,SIDEWALK_HEIGHT,sw.z1],[sw.x1,SIDEWALK_HEIGHT,sw.z1],[sw.x1,0,sw.z1]], color:SIDEWALK_SIDE});
+  else if(cam.z > sw.z2) faces.push({pts:[[sw.x1,0,sw.z2],[sw.x1,SIDEWALK_HEIGHT,sw.z2],[sw.x2,SIDEWALK_HEIGHT,sw.z2],[sw.x2,0,sw.z2]], color:SIDEWALK_SIDE});
+  // the TOP face used to be a single quad spanning the whole ~580-unit
+  // segment -- the painter's algorithm here sorts whole polygons by ONE
+  // averaged depth, so a polygon spanning that much depth range gets
+  // assigned a depth nowhere near correct for most of its own length.
+  // On its own that's invisible, but it's also why the surface itself
+  // reads wrong: a single flat, untextured slab stretching the full
+  // visible distance gives the eye no depth cue that it's actually
+  // level, so under this forced perspective it looks like a sloping ramp
+  // up to the building rather than a flat paved walkway receding into
+  // the distance -- exactly like the dashed road lines exist so the road
+  // itself doesn't look that way. Tiling the top into paving-slab-sized
+  // pieces, alternating two close shades, fixes both: each tile has its
+  // own correctly local depth, and the alternating bands read
+  // unambiguously as flat slabs going away from camera, the same trick
+  // roadMarks already relies on.
+  if(cam.y > SIDEWALK_HEIGHT){
+    const tileLen = 40;
+    let idx = 0;
+    for(let z=sw.z1; z<sw.z2; z+=tileLen){
+      const zEnd = Math.min(z+tileLen, sw.z2);
+      const color = (idx++ % 2===0) ? SIDEWALK_TOP : SIDEWALK_TOP2;
+      faces.push({pts:[[sw.x1,SIDEWALK_HEIGHT,z],[sw.x2,SIDEWALK_HEIGHT,z],[sw.x2,SIDEWALK_HEIGHT,zEnd],[sw.x1,SIDEWALK_HEIGHT,zEnd]], color});
+    }
+  }
+  return faces;
 }
 
 // A perimeter wall segment — same box shape as a building, one plain
