@@ -4118,8 +4118,12 @@ function buildMedianQuads(m, cam){
   return rectBoxFaces(m.x1, m.x2, m.z1, m.z2, 0, 2.2, cam, MEDIAN_SIDE, MEDIAN_TOP);
 }
 const SIDEWALK_SIDE = 'rgb(140,136,128)', SIDEWALK_TOP = 'rgb(182,177,165)';
+const SIDEWALK_HEIGHT = 3.2; // was 1.6 -- too thin a step to read as a raised kerb
 function buildSidewalkQuads(sw, cam){
-  return rectBoxFaces(sw.x1, sw.x2, sw.z1, sw.z2, 0, 1.6, cam, SIDEWALK_SIDE, SIDEWALK_TOP);
+  // was 1.6 -- a real curb face at this world's scale (roads over 100
+  // units wide, buildings 150+ tall), tall enough to read clearly as a
+  // raised kerb rather than a painted line level with the road
+  return rectBoxFaces(sw.x1, sw.x2, sw.z1, sw.z2, 0, SIDEWALK_HEIGHT, cam, SIDEWALK_SIDE, SIDEWALK_TOP);
 }
 
 // A perimeter wall segment — same box shape as a building, one plain
