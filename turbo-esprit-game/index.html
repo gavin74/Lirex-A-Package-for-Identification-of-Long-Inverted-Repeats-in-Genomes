@@ -619,8 +619,18 @@ function generateCity(seed){
       // nothing here ever needs to be approached from a particular side.
       const isGarage = !isGas && (i % 5 === 1 && j % 5 === 3 && i>0 && i<BLOCKS_X-1 && j>0 && j<BLOCKS_Z-1);
       if(isGarage){
-        garages.push({x:cx, z:cz, doorOpen:0,
-          entrance:{axis:'x', line: streetLinesZ[j], cross: cz-streetLinesZ[j], along: cx}});
+        // sitting at the full cell center put the garage a whole lot's
+        // depth (up to ~250+ units) from the curb it's supposedly set back
+        // from -- a forecourt far bigger than the "small lock-up garage"
+        // it's meant to read as, and visible as a hard teleport whenever a
+        // civilian actually pulled out: it spawns at the garage (see
+        // spawnCarAtGarage) then instantly snaps onto the real street lane
+        // the very next frame, a jump proportional to this same distance.
+        // GARAGE_HALF_DEPTH must match buildGarageQuads' own hz.
+        const GARAGE_HALF_DEPTH = 9, GARAGE_FORECOURT = 20;
+        const gz = z1 + GARAGE_HALF_DEPTH + GARAGE_FORECOURT;
+        garages.push({x:cx, z:gz, doorOpen:0,
+          entrance:{axis:'x', line: streetLinesZ[j], cross: gz-streetLinesZ[j], along: cx}});
         continue;
       }
       // one block in ~7 is split into two buildings with a narrow alley
@@ -1036,7 +1046,17 @@ function generateCity(seed){
     const ci = 1 + Math.floor(rwRnd()*(crossLines.length-2));
     const mid = (lines[li]+lines[li+1])/2;
     const cross = crossLines[ci];
-    const laneCenter = (rwRnd()<0.5?-1:1) * 14;
+    // a flat +-14 offset only ever lined up with a real lane by luck: an
+    // arterial's lanes sit at 8/24/40 (see laneCenterOffset) and a minor
+    // street's single lane sits at 16, so on an arterial in particular
+    // this could land the ramp straddling the gap between the turn area
+    // and the first lane -- physically on the road's surface, but not
+    // actually in the path of any car driving by lane rather than by eye,
+    // reading as "a ramp that's just off the road, with no way onto it".
+    // Using the innermost real lane on whichever street this landed on
+    // guarantees the ramp sits exactly where a car driving normally would.
+    const laneCount = laneCountAt(axis, cross);
+    const laneCenter = laneCenterOffset((rwRnd()<0.5?-1:1), laneCount);
     const len = 46;
     const zone = axis==='z'
       ? {x1:cross+laneCenter-9, x2:cross+laneCenter+9, z1:mid-len/2, z2:mid+len/2}
@@ -4110,7 +4130,13 @@ function rectBoxFaces(x1, x2, z1, z2, y0, y1, cam, sideColor, topColor){
   else if(cam.x > x2) faces.push({pts:[[x2,y0,z2],[x2,y1,z2],[x2,y1,z1],[x2,y0,z1]], color:sideColor});
   if(cam.z < z1) faces.push({pts:[[x2,y0,z1],[x2,y1,z1],[x1,y1,z1],[x1,y0,z1]], color:sideColor});
   else if(cam.z > z2) faces.push({pts:[[x1,y0,z2],[x1,y1,z2],[x2,y1,z2],[x2,y0,z2]], color:sideColor});
-  if(cam.y < y1) faces.push({pts:[[x1,y1,z1],[x2,y1,z1],[x2,y1,z2],[x1,y1,z2]], color:topColor});
+  // was `cam.y < y1` -- backwards for a short, ground-level slab like a
+  // sidewalk or median: the normal elevated chase cam sits well ABOVE a
+  // 2-3 unit curb, so that condition was false essentially every frame
+  // and the top face almost never drew, leaving only the side/curb faces
+  // visible -- reading as a flat painted edge with nothing between it and
+  // the sidewalk behind it, not a raised slab
+  if(cam.y > y1) faces.push({pts:[[x1,y1,z1],[x2,y1,z1],[x2,y1,z2],[x1,y1,z2]], color:topColor});
   return faces;
 }
 const MEDIAN_SIDE = 'rgb(150,148,138)', MEDIAN_TOP = 'rgb(120,165,95)';
@@ -4228,7 +4254,10 @@ function buildGarageQuads(g){
   const quads = [];
   quads.push({pts:[[x1,0,z1],[x1,h,z1],[x1,h,z2],[x1,0,z2]], color:bodyDark});
   quads.push({pts:[[x2,0,z2],[x2,h,z2],[x2,h,z1],[x2,0,z1]], color:bodyDark});
-  quads.push({pts:[[x1,0,z1],[x1,h,z1],[x2,h,z1],[x2,0,z1]], color:body});
+  // back wall, away from the street this garage is set back from (z1 is
+  // the street-facing side -- see the door below, and where gz is placed
+  // close to z1 in generateCity)
+  quads.push({pts:[[x1,0,z2],[x1,h,z2],[x2,h,z2],[x2,0,z2]], color:body});
   quads.push({pts:[[x1,h,z1],[x2,h,z1],[x2,h,z2],[x1,h,z2]], color:roof});
   // the door: a closed door reads as a plain dark grey recess; opening
   // darkens it further toward black (a shadowy interior) rather than
@@ -4236,7 +4265,7 @@ function buildGarageQuads(g){
   const doorW = hw*1.3, doorH = h*0.72;
   const shade = Math.round(58 - g.doorOpen*40);
   const doorColor = `rgb(${shade},${shade},${shade+4})`;
-  quads.push({pts:[[g.x-doorW/2,0,z2+0.08],[g.x-doorW/2,doorH,z2+0.08],[g.x+doorW/2,doorH,z2+0.08],[g.x+doorW/2,0,z2+0.08]], color:doorColor});
+  quads.push({pts:[[g.x-doorW/2,0,z1-0.08],[g.x-doorW/2,doorH,z1-0.08],[g.x+doorW/2,doorH,z1-0.08],[g.x+doorW/2,0,z1-0.08]], color:doorColor});
   return quads;
 }
 
@@ -5537,6 +5566,26 @@ function buildConeQuads(cx, cz){
 const RAMP_H = 7;
 const RAMP_UP = 'rgb(224,170,40)', RAMP_DOWN = 'rgb(188,134,24)';
 const RAMP_EDGE = 'rgb(28,28,30)', RAMP_SIDE = 'rgb(150,112,28)';
+// A flat ground-marking arrow pointing toward the ramp, painted a short
+// way before each end of it -- the ramp only launches the player if
+// they're already lined up within 10 units of its exact lane when they
+// cross its midpoint (see the roadworks loop in updatePlayer), with
+// nothing on screen to show which lane that is, which read as "a ramp
+// I have no way to actually get onto". `cross` is the lane's fixed
+// lateral offset, `tip` is where the arrowhead's point sits (just short
+// of the ramp), and `dir` is the direction of travel this arrow guides
+// (+1/-1 along the axis), so the same shape works for a car approaching
+// from either end.
+function buildLaneArrowQuads(axis, cross, tip, dir, color){
+  const w = 5, headW = 9, shaftLen = 10, headLen = 9;
+  const headBase = tip - dir*headLen;
+  const shaftBase = headBase - dir*shaftLen;
+  const mk = (along, c) => axis==='z' ? [c,0.12,along] : [along,0.12,c];
+  return [{pts:[
+    mk(shaftBase,cross-w/2), mk(headBase,cross-w/2), mk(headBase,cross-headW/2),
+    mk(tip,cross), mk(headBase,cross+headW/2), mk(headBase,cross+w/2), mk(shaftBase,cross+w/2)
+  ], color}];
+}
 function buildRoadworksQuads(zone){
   const quads = [];
   const {x1,x2,z1,z2,axis} = zone;
@@ -5557,6 +5606,15 @@ function buildRoadworksQuads(zone){
   }
   for(const cone of zone.cones) quads.push(...buildConeQuads(cone.x, cone.z));
   quads.push(...buildSignQuads({x:zone.signX, z:zone.signZ, axis:zone.axis, type:'roadworks'}));
+  const laneCross = zone.cross + zone.laneCenter;
+  const ARROW_COLOR = 'rgba(255,210,60,0.9)';
+  if(axis === 'z'){
+    quads.push(...buildLaneArrowQuads('z', laneCross, z1-14, 1, ARROW_COLOR));
+    quads.push(...buildLaneArrowQuads('z', laneCross, z2+14, -1, ARROW_COLOR));
+  } else {
+    quads.push(...buildLaneArrowQuads('x', laneCross, x1-14, 1, ARROW_COLOR));
+    quads.push(...buildLaneArrowQuads('x', laneCross, x2+14, -1, ARROW_COLOR));
+  }
   return quads;
 }
 
@@ -5693,7 +5751,12 @@ function buildBarrierQuads(px, pz, barrierT, side){
   quads.push({pts:[[px-1,0,pz],[px-1,postH,pz],[px+1,postH,pz],[px+1,0,pz]], color:'rgb(70,72,76)'});
   quads.push({pts:[[px,0,pz-1],[px,postH,pz-1],[px,postH,pz+1],[px,0,pz+1]], color:'rgb(70,72,76)'});
   const angle = (1-barrierT)*Math.PI/2; // 0 = horizontal/down (blocking), PI/2 = vertical/up (clear)
-  const armLen = 20;
+  // posts sit near each curb (ROAD_HALF_MINOR-3 either side of center, a
+  // 94-unit gap) -- at the old armLen=20, each arm only reached 20 units
+  // in from its own post, leaving a 54-unit drive-through hole down the
+  // middle even with both barriers fully down. 44 lets the two arms meet
+  // with just a small gap at the centerline, same as a real crossing gate.
+  const armLen = 44;
   const dx = Math.cos(angle)*armLen*side, dy = Math.sin(angle)*armLen;
   const segs = 3;
   for(let i=0;i<segs;i++){
