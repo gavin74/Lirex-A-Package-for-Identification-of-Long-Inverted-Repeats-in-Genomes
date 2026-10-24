@@ -4240,6 +4240,14 @@ function buildingWindows(b, faceAxis, constVal, lo, hi, cam){
   }
   const depthFor = (pos) => segDepths[clamp(Math.floor((pos-lo)/span*segN), 0, segN-1)];
 
+  // ground-floor shopfront: dark glass with a darker awning strip above it,
+  // one piece per wall segment so each sorts with the wall behind it
+  for(let i=0;i<segN;i++){
+    const s0 = lo + span*i/segN, s1 = lo + span*(i+1)/segN;
+    quads.push({pts: facePlanePts(faceAxis, constVal, s0+1, s1-1, 2, 17), color:'rgba(40,52,60,0.94)', depthOverride: segDepths[i]-1});
+    quads.push({pts: facePlanePts(faceAxis, constVal, s0, s1, 17, 21), color: shadeColor(b.tint, b.shade*0.55), depthOverride: segDepths[i]-1});
+  }
+
   if(usable > 0 && cols > 0){
     const ww = Math.min(11, usable/cols*0.52);
     const gap = cols > 1 ? (usable - ww*cols)/(cols-1) : 0;
@@ -4260,6 +4268,7 @@ function buildingWindows(b, faceAxis, constVal, lo, hi, cam){
           const lit = row && row[c];
           color = lit ? 'rgba(232,202,120,0.92)' : 'rgba(52,58,64,0.9)';
         }
+        quads.push({pts: facePlanePts(faceAxis, constVal, pos-1, pos+ww+1, y0-2.5, y0), color:'rgba(176,171,162,0.95)', depthOverride: depthFor(pos)});
         quads.push({pts: facePlanePts(faceAxis, constVal, pos, pos+ww, y0, y1), color, depthOverride: depthFor(pos)});
       }
     }
@@ -4303,12 +4312,12 @@ function buildingFaces(b, cam, near){
     if(near) faces.push(...buildingWindows(b, 'x', b.x1, b.z1, b.z2, cam));
   } else if(cam.x > b.x2){
     const color = shadeColor(tint, b.shade*0.85);
-    for(const pts of facePlaneSegments('x', b.x2, b.z2, b.z1, 0, b.h, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color});
+    for(const pts of facePlaneSegments('x', b.x2, b.z1, b.z2, 0, b.h, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color});
     if(near) faces.push(...buildingWindows(b, 'x', b.x2, b.z1, b.z2, cam));
   }
   if(cam.z < b.z1){
     const color = shadeColor(tint, b.shade*1.05);
-    for(const pts of facePlaneSegments('z', b.z1, b.x2, b.x1, 0, b.h, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color});
+    for(const pts of facePlaneSegments('z', b.z1, b.x1, b.x2, 0, b.h, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color});
     if(near) faces.push(...buildingWindows(b, 'z', b.z1, b.x1, b.x2, cam));
   } else if(cam.z > b.z2){
     const color = shadeColor(tint, b.shade*1.05);
@@ -4318,6 +4327,27 @@ function buildingFaces(b, cam, near){
   if(cam.y < b.h){
     faces.push({pts:[[b.x1,b.h,b.z1],[b.x2,b.h,b.z1],[b.x2,b.h,b.z2],[b.x1,b.h,b.z2]], color: shadeColor(tint, b.shade*1.15)});
   }
+  if(near){
+    faces.push(...buildingCornice(b, cam));
+    if(b.h > 150){
+      const px = b.x1 + (b.x2-b.x1)*0.3 + ((b.x1*7)%11), pz = b.z1 + (b.z2-b.z1)*0.45;
+      faces.push(...rectBoxFaces(px, px+12, pz, pz+9, b.h+4, b.h+12, cam, shadeColor([150,150,146],0.8), shadeColor([168,168,162],1.0)));
+    }
+  }
+  return faces;
+}
+
+// a band of slightly darker masonry capping each building, pieced into
+// wall-length segments so it sorts like the facade under it
+function buildingCornice(b, cam){
+  const faces = [];
+  const x1 = b.x1-2, x2 = b.x2+2, z1 = b.z1-2, z2 = b.z2+2, h0 = b.h, h1 = b.h+4;
+  const side = shadeColor(b.tint, b.shade*0.9);
+  if(cam.x < x1) for(const pts of facePlaneSegments('x', x1, z1, z2, h0, h1, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color: side});
+  else if(cam.x > x2) for(const pts of facePlaneSegments('x', x2, z2, z1, h0, h1, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color: side});
+  if(cam.z < z1) for(const pts of facePlaneSegments('z', z1, x2, x1, h0, h1, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color: side});
+  else if(cam.z > z2) for(const pts of facePlaneSegments('z', z2, x1, x2, h0, h1, WALL_SEGMENT_MAX_LEN)) faces.push({pts, color: side});
+  if(cam.y > h1) faces.push({pts:[[x1,h1,z1],[x2,h1,z1],[x2,h1,z2],[x1,h1,z2]], color: shadeColor(b.tint, b.shade*1.25)});
   return faces;
 }
 
