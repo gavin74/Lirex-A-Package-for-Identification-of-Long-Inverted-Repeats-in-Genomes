@@ -1314,6 +1314,9 @@ let respawns = [];
 let blasts = [];      // {x,y,z,t} explosion fireballs for destroyed vehicles
 let damagePops = [];  // {text,x,y,z,t} floating "-N%" numbers anchored to a car
 let impactFlash = 0;  // 0..1 red edge flash when the player takes a crash
+let pedDown = {};     // walker id -> worldTime when they're back on their feet
+let splats = [];      // {x,z,t} blood on the road where a walker was hit
+let walkersThisFrame = [];
 function trafficListFor(type){
   const map = {car:()=>civilians, police:()=>police, ambulance:()=>ambulances, firetruck:()=>fireTrucks,
     dumptruck:()=>dumpTrucks, bigrig:()=>bigRigs, streetsweeper:()=>streetSweepers, bus:()=>buses,
@@ -1321,7 +1324,7 @@ function trafficListFor(type){
   return map[type] ? map[type]() : null;
 }
 function damageVehicle(car, amount){
-  if(!car || car===player || car===suspect || !(amount > 0)) return;
+  if(!car || car===player || car===suspect || !(amount >= 1)) return;
   car.damage = (car.damage || 0) + amount;
   damagePops.push({text: '-' + Math.round(amount) + '%', x: car.x, y: 16, z: car.z, t: 0});
   if(car.damage >= 100) blowUpVehicle(car);
@@ -1359,8 +1362,11 @@ function updateEffects(dt){
   for(const p of damagePops) p.t += dt;
   damagePops = damagePops.filter(p => p.t < 1.2);
   impactFlash = Math.max(0, impactFlash - dt*1.6);
+  for(const s of splats) s.t += dt;
+  splats = splats.filter(s => s.t < 25);
 }
 function onPlayerDamage(added){
+  if(!(added >= 1)) return;
   impactFlash = Math.max(impactFlash, clamp(added/35, 0.35, 1));
   damagePops.push({text: '-' + Math.round(added) + '%', x: player.x, y: player.y + 24, z: player.z, t: 0});
 }
@@ -1745,6 +1751,7 @@ const Engine = (function(){
   // its own, so the sample adds real-recording grain/texture on top of
   // that instead of trading away the dynamics for it
   let sampleBus = null, engineLayers = [], sampleVol = 0;
+  let revState = 0.3, engineLastT = 0;
 
   // normalized so the curve's peak stays near +-1 regardless of amount,
   // giving saturation character without the harsh clipping that comes
@@ -1898,9 +1905,17 @@ const Engine = (function(){
     const spd = Math.abs(speed);
     const GEARS = 4;
     const span = maxSpeed / GEARS;
-    // one continuous rev curve from road speed -- a per-gear sawtooth dropped
-    // the pitch back to idle at every gear change, which read as a cough
-    const revCurve = Math.pow(clamp(spd/maxSpeed, 0, 1), 0.8);
+    // four gears: within each gear the revs climb with road speed, and the
+    // rev value then glides toward its target over ~0.12 s -- so an upshift
+    // drops the revs and pitch down in a short swoop instead of jumping
+    // (an instant drop read as a cough, a constant climb as no gears at all)
+    const GEARS_N = 4, gearSpan = maxSpeed / GEARS_N;
+    const inGear = clamp((spd % gearSpan) / gearSpan, 0, 1);
+    const revTarget = 0.3 + 0.7*inGear;
+    const dtE = Math.min(0.1, Math.max(0, now - (engineLastT || now)));
+    engineLastT = now;
+    revState += (revTarget - revState) * (1 - Math.exp(-dtE/0.12));
+    const revCurve = revState;
     const idleHz = 55, revHz = 190;
     const baseHz = idleHz + revCurve * (revHz - idleHz);
 
@@ -1931,7 +1946,7 @@ const Engine = (function(){
     noiseFilter.frequency.setTargetAtTime(500 + spd*3.2, now, 0.15);
     noiseGain.gain.setTargetAtTime(Math.min(spd/maxSpeed,1)*0.03, now, 0.15);
 
-    currentVol = 0.07 + Math.min(spd/maxSpeed, 1)*0.11 + throttleBoost*0.05;
+    currentVol = 0.04 + Math.min(spd/maxSpeed, 1)*0.07 + throttleBoost*0.03;
     gainMaster.gain.setTargetAtTime(muted ? 0 : currentVol, now, 0.1);
 
     // the recorded engine loops are ordered low to high, so road speed
@@ -2871,8 +2886,15 @@ function updatePlayer(dt){
   } else {
     rx = player.x; rz = player.z;
     const skipMedians = !!player.arcTurn || player.turnSettleT > 0;
-    if(collideWorld(nx, rz, CAR_R, skipMedians)){ hit = true; hitVehicle = lastVehicleHit; } else rx = nx;
-    if(collideWorld(rx, nz, CAR_R, skipMedians)){ hit = true; hitVehicle = lastVehicleHit || hitVehicle; } else rz = nz;
+    // already touching a car (e.g. one that drove into a stopped player):
+    // steps that take the player further away from it aren't blocked by it,
+    // otherwise every reverse press re-registers as a crash and zeroes speed
+    const pinnedCar = collideWorld(player.x, player.z, CAR_R, skipMedians) ? lastVehicleHit : null;
+    const awayAlong = (car, x, z) => car.axis==='z' ? Math.abs(z-car.z) : Math.abs(x-car.x);
+    const pinX = pinnedCar && awayAlong(pinnedCar, nx, player.z) >= awayAlong(pinnedCar, player.x, player.z) ? pinnedCar : null;
+    if(collideWorld(nx, rz, CAR_R, skipMedians, pinX)){ hit = true; hitVehicle = lastVehicleHit; } else rx = nx;
+    const pinZ = pinnedCar && awayAlong(pinnedCar, rx, nz) >= awayAlong(pinnedCar, rx, player.z) ? pinnedCar : null;
+    if(collideWorld(rx, nz, CAR_R, skipMedians, pinZ)){ hit = true; hitVehicle = lastVehicleHit || hitVehicle; } else rz = nz;
   }
 
   player.x = clamp(rx, -worldHalfX+20, worldHalfX-20);
@@ -2983,7 +3005,7 @@ function collideBuildings(x, z, r){
 // clip it — "a grey rod in the middle of the junction that turning hits" —
 // even though a real UK mini-roundabout is specifically a low, mountable
 // island that larger vehicles are expected to drive over, not a wall.
-function collideWorld(x, z, r, ignoreMedians){
+function collideWorld(x, z, r, ignoreMedians, ignoreCar){
   lastVehicleHit = null;
   if(collideBuildings(x,z,r)) return true;
   if(ROUNDABOUTS_ENABLED && !ignoreMedians){
@@ -3028,6 +3050,7 @@ function collideWorld(x, z, r, ignoreMedians){
   // above, cut that same sweep's lateral false hits to zero across ten runs.
   const longMargin = r+8, latMargin = r-7;
   for(const c of allTraffic()){
+    if(c===ignoreCar) continue;
     const dx = x-c.x, dz = z-c.z;
     const along = c.axis==='z' ? Math.abs(dz) : Math.abs(dx);
     const across = c.axis==='z' ? Math.abs(dx) : Math.abs(dz);
@@ -3200,8 +3223,84 @@ function updateStreetCarArc(car, dt){
     car.arcTurn = null;
   }
 }
+// overlap of two car bodies, axis-aligned on each car's own footprint;
+// tol is how far they may interpenetrate before it counts as contact
+function carsOverlap(a, b, tol){
+  const ea = VEHICLE_FOOTPRINT[a.type] || VEHICLE_FOOTPRINT.car, eb = VEHICLE_FOOTPRINT[b.type] || VEHICLE_FOOTPRINT.car;
+  const La = Math.max(Math.abs(ea[1]), Math.abs(ea[2])), Lb = Math.max(Math.abs(eb[1]), Math.abs(eb[2]));
+  const ax = a.axis==='z' ? ea[0] : La, az = a.axis==='z' ? La : ea[0];
+  const bx = b.axis==='z' ? eb[0] : Lb, bz = b.axis==='z' ? Lb : eb[0];
+  // tol only shortens the length-wise reach; the lateral test stays tight so
+  // cars in neighbouring lanes never count as touching
+  return Math.abs(a.x-b.x) < ax + bx - 2 && Math.abs(a.z-b.z) < az + bz - tol;
+}
+function relativeSpeed(a, b){
+  const vax = a.axis==='z' ? 0 : a.dir*a.speed, vaz = a.axis==='z' ? a.dir*a.speed : 0;
+  const vbx = b.axis==='z' ? 0 : b.dir*b.speed, vbz = b.axis==='z' ? b.dir*b.speed : 0;
+  return Math.hypot(vax-vbx, vaz-vbz);
+}
+// returns true while the car is in contact, and holds it still
+function checkCarContacts(car, dt){
+  car.hitCooldown = Math.max(0, (car.hitCooldown || 0) - dt);
+  // two AI cars that crashed sit still for a few seconds, then drive on
+  // together until they've separated (otherwise they'd lock up for good)
+  if(car.holdT > 0){ car.holdT -= dt; car.speed = 0; car.braking = true; return true; }
+  if(car.ignoreCar && !carsOverlap(car, car.ignoreCar, 16)) car.ignoreCar = null;
+  let touching = false;
+  for(const other of [player, ...allTraffic()]){
+    if(other===car || other===car.ignoreCar) continue;
+    if(Math.abs(other.x-car.x) > 70 || Math.abs(other.z-car.z) > 70) continue;
+    const isPlayer = other===player;
+    // the player's own contact (updatePlayer) is the tight one; AI bodies
+    // queue about 20 apart, so AI-on-AI only counts once they really touch
+    if(!carsOverlap(car, other, isPlayer ? 4 : 16)) continue;
+    touching = true;
+    const v = relativeSpeed(car, other);
+    const canHurt = isPlayer ? player.crashCooldown <= 0 : (car.hitCooldown <= 0 && (other.hitCooldown || 0) <= 0);
+    if(v > 25 && canHurt){
+      const amount = clamp(v/220, 0, 2) * 50;
+      car.hitCooldown = 2.5;
+      SFX.crash();
+      if(isPlayer){
+        player.crashCooldown = 0.8;
+        damage = clamp(damage + amount, 0, 100);
+        onPlayerDamage(amount);
+        spookSuspectNear(car.x, car.z);
+        shakeTimer = SHAKE_DURATION;
+        if(damage >= 100 && gameState === 'playing') startWreck('WRECKED');
+      } else {
+        other.hitCooldown = 2.5;
+        damageVehicle(other, amount);
+        car.ignoreCar = other; other.ignoreCar = car;
+        car.holdT = 3; other.holdT = 3;
+      }
+      damageVehicle(car, amount);
+    }
+  }
+  // walkers: anything moving through a pedestrian or dog in its lane knocks
+  // them down (they respawn after a while, and leave blood on the road)
+  if(Math.abs(car.speed) > 3){
+    const half = vehicleHalfLength(car);
+    const hw = (VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car)[0];
+    for(const p of walkersThisFrame){
+      if(pedDown[p.id] > worldTime) continue;
+      const along = car.axis==='z' ? (p.z-car.z)*car.dir : (p.x-car.x)*car.dir;
+      const across = car.axis==='z' ? Math.abs(p.x-car.x) : Math.abs(p.z-car.z);
+      if(along > -half-1 && along < half+1 && across < hw + 2){
+        pedDown[p.id] = worldTime + 30;
+        splats.push({x: p.x, z: p.z, t: 0});
+        SFX.screech();
+        car.speed *= 0.6;
+      }
+    }
+  }
+  if(touching){ car.speed = 0; car.braking = true; }
+  return touching;
+}
+
 function updateStreetCar(car, dt){
   if(checkOilSlick(car, dt)){ car.braking = true; return; }
+  if(checkCarContacts(car, dt)) return;
   if(car.arcTurn){ updateStreetCarArc(car, dt); return; }
   const exempt = car.fleeing || car.type==='ambulance' || car.type==='firetruck';
 
@@ -3287,7 +3386,7 @@ function updateStreetCar(car, dt){
   let nearestAhead = Infinity, nearestIsPlayer = false, nearestLateralGap = Infinity;
   const ownHalfWidth = (VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car)[0];
   const checkAhead = (other) => {
-    if(!other || other === car) return;
+    if(!other || other === car || other === car.ignoreCar) return;
     const oForward = car.axis==='z' ? other.z : other.x;
     const oCross = car.axis==='z' ? other.x : other.z;
     const aheadDist = (oForward - forward) * car.dir;
@@ -3343,7 +3442,7 @@ function updateStreetCar(car, dt){
     }
   }
   // pedestrians and dogs in this lane ahead: ease off and stop short of them
-  for(const p of [...pedestrianPositions(), ...dogPositions()]){
+  for(const p of walkersThisFrame){
     const pForward = car.axis==='z' ? p.z : p.x;
     const pCross = car.axis==='z' ? p.x : p.z;
     const ahead = (pForward - forward) * car.dir;
@@ -3559,6 +3658,8 @@ function checkPlayerViolations(dt){
   for(const p of pedestrianPositions()){
     if(dist2(player.x,player.z,p.x,p.z) < 12*12 && Math.abs(player.speed) > 15){
       triggerWanted('HIT A PEDESTRIAN');
+      pedDown[p.id] = worldTime + 30;
+      splats.push({x: p.x, z: p.z, t: 0});
       // same bounded bleed-down as clipping traffic (see hazardSlowT near
       // the top of updatePlayer) instead of a one-frame snap to 30%
       player.hazardSlowFloor = Math.abs(player.speed) * 0.3;
@@ -3929,6 +4030,7 @@ function update(dt){
 
   worldTime += dt;
   updateRespawns();
+  walkersThisFrame = [...pedestrianPositions(), ...dogPositions()];
   if(shakeTimer > 0) shakeTimer -= dt;
   updateBlink(dt);
   updateWindowFlicker(dt);
@@ -4898,7 +5000,19 @@ function buildBrakeGlow(car){
 const FLAME_DAMAGE_THRESHOLD = 65;
 function buildDamageFlames(car){
   const dmg = car===player ? damage : (car.damage || 0);
-  if(dmg < FLAME_DAMAGE_THRESHOLD) return [];
+  const smoke = [];
+  if(dmg >= 50 && !(car===player && playerWrecked)){
+    const sA = clamp((dmg-50)/50, 0, 1);
+    const sd = VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car;
+    const sS = Math.sin(car.heading), sC = Math.cos(car.heading);
+    for(let k=0;k<3;k++){
+      const ph = (worldTime*0.35 + k/3 + car.x*0.001) % 1;
+      const lx = (k-1)*sd[0]*0.4, lz = sd[1]*0.5;
+      const px = car.x + lx*sC + lz*sS, pz = car.z - lx*sS + lz*sC;
+      smoke.push(...buildGlowQuads(px, 9 + ph*22, pz, (3 + ph*9)*(0.6+0.4*sA), [90,90,90], (1-ph)*0.35*sA));
+    }
+  }
+  if(dmg < FLAME_DAMAGE_THRESHOLD) return smoke;
   const t = clamp((dmg-FLAME_DAMAGE_THRESHOLD)/(100-FLAME_DAMAGE_THRESHOLD), 0, 1);
   const d = VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car;
   const s = Math.sin(car.heading), c = Math.cos(car.heading);
@@ -4913,7 +5027,7 @@ function buildDamageFlames(car){
     quads.push(...buildGlowQuads(p[0],p[1]+1.4,p[2], (1+2.2*t)*flicker, [255,205,90], 0.6*t*flicker));
     i++;
   }
-  return quads;
+  return [...smoke, ...quads];
 }
 
 function buildVehicleQuads(car){
@@ -6080,7 +6194,7 @@ function pedestrianPositions(){
     const off = wave * span/2;
     const pos = cr.axis==='z' ? {x:cr.x+off, z:cr.z-8} : {x:cr.x-8, z:cr.z+off};
     const baseFacing = cr.axis==='z' ? Math.PI/2 : 0;
-    list.push({x:pos.x, z:pos.z, facing: movingBack?baseFacing+Math.PI:baseFacing, color:PED_COLORS[i%PED_COLORS.length], walk:ph});
+    list.push({id:'c'+i, x:pos.x, z:pos.z, facing: movingBack?baseFacing+Math.PI:baseFacing, color:PED_COLORS[i%PED_COLORS.length], walk:ph});
   }
   // sidewalk beats: a pedestrian ambling along the curb, parallel to the
   // street, not just crossing it — this is where "walking the dog" lives
@@ -6091,9 +6205,9 @@ function pedestrianPositions(){
     const off = wave * swSpan/2;
     const pos = sb.axis==='z' ? {x:sb.x, z:sb.z+off} : {x:sb.x+off, z:sb.z};
     const baseFacing = sb.axis==='z' ? 0 : Math.PI/2;
-    list.push({x:pos.x, z:pos.z, facing: movingBack?baseFacing+Math.PI:baseFacing, color:PED_COLORS[(i+2)%PED_COLORS.length], walk:ph, sidewalk:sb, swOff:off});
+    list.push({id:'s'+i, x:pos.x, z:pos.z, facing: movingBack?baseFacing+Math.PI:baseFacing, color:PED_COLORS[(i+2)%PED_COLORS.length], walk:ph, sidewalk:sb, swOff:off});
   }
-  return list;
+  return list.filter(p => !(pedDown[p.id] > worldTime));
 }
 function dogPositions(){
   const list = [];
@@ -6104,7 +6218,7 @@ function dogPositions(){
     const off = wave * span/2;
     const pos = cr.axis==='z' ? {x:cr.x+off, z:cr.z-4} : {x:cr.x-4, z:cr.z+off};
     const baseFacing = cr.axis==='z' ? Math.PI/2 : 0;
-    list.push({x:pos.x, z:pos.z, facing: movingBack?baseFacing+Math.PI:baseFacing, walk:ph});
+    list.push({id:'dc'+i, x:pos.x, z:pos.z, facing: movingBack?baseFacing+Math.PI:baseFacing, walk:ph});
   }
   // dogs being walked on the sidewalk beats that have one, trailing just
   // behind their walker at the same pace — on an invisible leash
@@ -6114,9 +6228,9 @@ function dogPositions(){
     const lag = 6;
     const trail = sb.axis==='z' ? {x:sb.x+3, z:p.z - lag*Math.sign(p.swOff||1)} : {x:p.x - lag*Math.sign(p.swOff||1), z:sb.z+3};
     const facing = sb.axis==='z' ? 0 : Math.PI/2;
-    list.push({x:trail.x, z:trail.z, facing, walk:p.walk});
+    list.push({id:'dw'+p.id, x:trail.x, z:trail.z, facing, walk:p.walk});
   }
-  return list;
+  return list.filter(d => !(pedDown[d.id] > worldTime));
 }
 
 // a very small stick figure: two legs (alternating with the walk cycle),
@@ -6599,6 +6713,10 @@ function drawScene(){
     }
   }
 
+  for(const s of splats){
+    const q = projectFace([[s.x-4,0.05,s.z-4],[s.x+4,0.05,s.z-4],[s.x+4,0.05,s.z+4],[s.x-4,0.05,s.z+4]], cam);
+    if(q) polyFill(q, `rgba(120,18,18,${(0.85*(1-s.t/25)).toFixed(3)})`, null);
+  }
   // Collect every individual face (not grouped by object) and depth-sort
   // them all together. Grouping by object and sorting on one depth per
   // object — e.g. a building's centroid — is what caused roofs to paint
@@ -6968,6 +7086,7 @@ function drawScene(){
   drawWreck(cam);
   for(const b of blasts) drawBlast(b, 1.4, cam, false);
   drawDamagePops(cam);
+  drawCarCracks(cam);
   drawImpactFlash();
   drawRain();
   drawLightning();
@@ -7029,6 +7148,43 @@ function drawDamagePops(cam){
     ctx.fillStyle = '#ff5a48';
     ctx.fillText(pop.text, sp.x, sp.y);
     ctx.restore();
+  }
+}
+
+// cracks spread across a car's rear (or nose, when it's coming at you) as
+// its damage climbs -- drawn over the car, so they show whatever the body
+const CRACK_PATHS = [
+  {at:15, face:'rear', pts:[[-3.5,10.5],[-1.8,11.8],[-0.6,10.2],[0.9,12.6],[2.6,11.0],[3.8,13.4]]},
+  {at:25, face:'rear', pts:[[0.2,14.8],[1.1,13.2],[0.4,11.9],[-0.6,10.6]]},
+  {at:35, face:'rear', pts:[[-5,14],[-3.2,12.9],[-2.6,11.2]]},
+  {at:45, face:'nose', pts:[[-5.2,4.5],[-3.6,5.8],[-2.1,4.9],[-0.2,6.4],[1.6,5.1],[3.8,6.7]]},
+  {at:55, face:'nose', pts:[[4.6,8.6],[5.3,6.2],[6.4,4.9]]},
+];
+function drawCarCracks(cam){
+  for(const car of allCars()){
+    if(car===suspect) continue;
+    if(car===player && playerWrecked) continue;
+    const dmg = car===player ? damage : (car.damage || 0);
+    if(dmg < 15) continue;
+    if(dist2(cam.x, cam.z, car.x, car.z) > 300*300) continue;
+    const s = Math.sin(car.heading), co = Math.cos(car.heading);
+    const towardCam = (cam.x-car.x)*s + (cam.z-car.z)*co < 0 ? 'rear' : 'nose';
+    const lz = towardCam === 'rear' ? -9.3 : 12.2;
+    for(const path of CRACK_PATHS){
+      if(dmg < path.at || path.face !== towardCam) continue;
+      ctx.beginPath();
+      let started = false;
+      for(const [lx, ly] of path.pts){
+        const wx = car.x + lx*co + lz*s, wz = car.z - lx*s + lz*co;
+        const sc = toCamSpace(wx, ly, wz, cam);
+        if(sc.z <= NEAR){ started = false; continue; }
+        const sp = toScreen(sc);
+        if(!started){ ctx.moveTo(sp.x, sp.y); started = true; } else ctx.lineTo(sp.x, sp.y);
+      }
+      ctx.lineWidth = 1.4;
+      ctx.strokeStyle = 'rgba(16,14,14,0.9)';
+      ctx.stroke();
+    }
   }
 }
 
