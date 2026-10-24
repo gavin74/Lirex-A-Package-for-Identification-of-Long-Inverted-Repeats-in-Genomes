@@ -2668,15 +2668,15 @@ function updatePlayer(dt){
   // axis-separated collision so the car slides along walls instead of
   // freezing in place when it grazes a building — skipped entirely while
   // airborne, same as a real jump clearing whatever's on the ground below
-  let hit = false;
+  let hit = false, hitVehicle = null;
   let rx, rz;
   if(player.airborne){
     rx = nx; rz = nz;
   } else {
     rx = player.x; rz = player.z;
     const skipMedians = !!player.arcTurn || player.turnSettleT > 0;
-    if(collideWorld(nx, rz, CAR_R, skipMedians)) hit = true; else rx = nx;
-    if(collideWorld(rx, nz, CAR_R, skipMedians)) hit = true; else rz = nz;
+    if(collideWorld(nx, rz, CAR_R, skipMedians)){ hit = true; hitVehicle = lastVehicleHit; } else rx = nx;
+    if(collideWorld(rx, nz, CAR_R, skipMedians)){ hit = true; hitVehicle = lastVehicleHit || hitVehicle; } else rz = nz;
   }
 
   player.x = clamp(rx, -worldHalfX+20, worldHalfX-20);
@@ -2707,7 +2707,6 @@ function updatePlayer(dt){
     // same player speed. A static-object crash (building, median) has no
     // "other vehicle" to close with, so it keeps using the player's own
     // speed as before.
-    const hitVehicle = lastVehicleHit;
     const impactSpeed = hitVehicle ? closingSpeed(hitVehicle) : Math.abs(player.speed);
     player.speed = 0; // stop dead on impact, not a damped carry-through
     if(player.crashCooldown <= 0){
@@ -2790,6 +2789,7 @@ function collideBuildings(x, z, r){
 // even though a real UK mini-roundabout is specifically a low, mountable
 // island that larger vehicles are expected to drive over, not a wall.
 function collideWorld(x, z, r, ignoreMedians){
+  lastVehicleHit = null;
   if(collideBuildings(x,z,r)) return true;
   if(ROUNDABOUTS_ENABLED && !ignoreMedians){
     for(const rb of roundabouts){
