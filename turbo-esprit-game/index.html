@@ -194,12 +194,13 @@
           <span class="keys">V</span> change view&nbsp;&nbsp;
           <span class="keys">M</span> mute&nbsp;&nbsp;
           <span class="keys">R</span> restart&nbsp;&nbsp;
-          <span class="keys">N</span> next track
+          <span class="keys">N</span> next track&nbsp;&nbsp;
+          <span class="keys">B</span> blood: <span id="bloodState">off</span>
         </p>
         <div class="row" style="display:flex;align-items:center;gap:10px;justify-content:center;margin:10px 0;">
           <label for="trafficSlider" style="font-size:13px;opacity:0.85">TRAFFIC</label>
-          <input type="range" id="trafficSlider" min="0.4" max="4" step="0.2" value="2.2">
-          <span id="trafficSliderVal" style="font-size:13px;opacity:0.85;min-width:2.5em">2.2x</span>
+          <input type="range" id="trafficSlider" min="0.4" max="8" step="0.2" value="6.6">
+          <span id="trafficSliderVal" style="font-size:13px;opacity:0.85;min-width:2.5em">6.6x</span>
         </div>
         <div class="go" id="btnStart">PRESS ENTER OR CLICK TO DRIVE</div>
       </div>
@@ -1317,6 +1318,12 @@ let impactFlash = 0;  // 0..1 red edge flash when the player takes a crash
 let pedDown = {};     // walker id -> worldTime when they're back on their feet
 let splats = [];      // {x,z,t} blood on the road where a walker was hit
 let walkersThisFrame = [];
+let bloodOn = false; // blood on the road where walkers are hit -- off by default
+function toggleBlood(){
+  bloodOn = !bloodOn;
+  document.getElementById('bloodState').textContent = bloodOn ? 'on' : 'off';
+  showBanner('BLOOD ' + (bloodOn ? 'ON' : 'OFF'), 0.8);
+}
 function trafficListFor(type){
   const map = {car:()=>civilians, police:()=>police, ambulance:()=>ambulances, firetruck:()=>fireTrucks,
     dumptruck:()=>dumpTrucks, bigrig:()=>bigRigs, streetsweeper:()=>streetSweepers, bus:()=>buses,
@@ -1353,7 +1360,10 @@ function updateRespawns(){
     if(worldTime < r.at) continue;
     respawns.splice(i, 1);
     const list = trafficListFor(r.type);
-    if(list) list.push(spawnStreetCar(...r.args));
+    if(!list) continue;
+    const nc = spawnStreetCar(...r.args);
+    if(dist2(nc.x, nc.z, player.x, player.z) < 60*60) continue;
+    list.push(nc);
   }
 }
 function updateEffects(dt){
@@ -1412,6 +1422,23 @@ function spawnPlayerStart(){
   car.carPark = null; car.carParkLastDepth = -Infinity;
   car.hazardSlowT = 0; car.hazardSlowFloor = 0;
   return car;
+}
+
+// traffic can only land this close to the player through a failed spawn-
+// clearance search (see spawnStreetCar); cars that did are removed at once
+function pruneNearPlayer(){
+  const lists = [police, ambulances, fireTrucks, dumpTrucks, bigRigs, streetSweepers, buses, motorbikes, vans, ebikes, civilians];
+  const kept = [];
+  for(const list of lists){
+    if(!list) continue;
+    for(let i = list.length-1; i >= 0; i--){
+      const car = list[i];
+      const onPlayer = dist2(car.x, car.z, player.x, player.z) < 60*60;
+      const stacked = kept.some(k => carsOverlap(car, k, 16));
+      if(onPlayer || stacked){ list.splice(i, 1); continue; }
+      kept.push(car);
+    }
+  }
 }
 
 function resetGame(){
@@ -1592,6 +1619,7 @@ function snapToLane(car, lineX, lineZ){
 
 function spawnSuspect(){
   roundLevel++;
+  pruneNearPlayer();
   suspect = spawnStreetCar('#e8b23a', 118 + roundLevel*7, 'sports');
   suspect.fleeing = false;
   suspectSuspicion = 0;
@@ -1666,6 +1694,7 @@ window.addEventListener('keydown', e=>{
   if(k==='h' && !e.repeat) honk();
   if(k==='t' && !e.repeat) cycleRadio();
   if(k==='n' && !e.repeat) cycleMusic();
+  if(k==='b' && !e.repeat) toggleBlood();
   if(k==='[' && !e.repeat){ FOG_BAND = clamp(FOG_BAND-0.05, 0.05, 0.95); showBanner('FOG BAND: '+FOG_BAND.toFixed(2), 0.8); }
   if(k===']' && !e.repeat){ FOG_BAND = clamp(FOG_BAND+0.05, 0.05, 0.95); showBanner('FOG BAND: '+FOG_BAND.toFixed(2), 0.8); }
   if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k)) e.preventDefault();
@@ -1677,7 +1706,7 @@ if(!FUEL_ENABLED) document.getElementById('fuelDial').style.display = 'none';
 document.getElementById('btnStart').addEventListener('click', startGame);
 document.getElementById('wrap').addEventListener('click', (e)=>{ if(gameState==='start' && e.target.id!=='trafficSlider') startGame(); });
 
-let trafficDensity = 2.2;
+let trafficDensity = 6.6;
 const trafficSliderEl = document.getElementById('trafficSlider');
 trafficSliderEl.addEventListener('click', e => e.stopPropagation());
 trafficSliderEl.addEventListener('input', () => {
@@ -2214,7 +2243,21 @@ const SFX = (function(){
     explosionLoading.then(buf => { if(!Engine.isMuted) playExplosionBuffer(ac, buf); }).catch(() => {});
   }
 
-  return { crash, bust, gunshot, horn, screech, sirenStart, sirenStop, thunder, explosion };
+  // a soft, low knock for a slow contact -- no smash, no damage
+  function bump(){
+    const ac = ctx();
+    if(!ac || Engine.isMuted) return;
+    const now = ac.currentTime;
+    const len = Math.floor(ac.sampleRate*0.12);
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for(let i=0;i<len;i++) d[i] = (Math.random()*2-1)*(1-i/len);
+    const src = ac.createBufferSource(); src.buffer = buf;
+    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 380;
+    const g = ac.createGain(); g.gain.setValueAtTime(0.06, now);
+    src.connect(lp); lp.connect(g); g.connect(ac.destination); src.start(now);
+  }
+  return { crash, bump, bust, gunshot, horn, screech, sirenStart, sirenStop, thunder, explosion };
 })();
 
 // Juhani Junkala's "5 Action Chiptunes" (CC0, opengameart.org/content/5-chiptunes-action),
@@ -2927,7 +2970,10 @@ function updatePlayer(dt){
     // speed as before.
     const impactSpeed = hitVehicle ? closingSpeed(hitVehicle) : Math.abs(player.speed);
     player.speed = 0; // stop dead on impact, not a damped carry-through
-    if(player.crashCooldown <= 0){
+    if(player.crashCooldown <= 0 && impactSpeed < 25){
+      player.crashCooldown = 0.4;
+      SFX.bump();
+    } else if(player.crashCooldown <= 0){
       fuel -= 3;
       // harder impacts do more damage — a gentle nudge barely registers,
       // slamming in at speed can take a real chunk off in one hit.
@@ -3242,6 +3288,7 @@ function relativeSpeed(a, b){
 // returns true while the car is in contact, and holds it still
 function checkCarContacts(car, dt){
   car.hitCooldown = Math.max(0, (car.hitCooldown || 0) - dt);
+  car.bumpCd = Math.max(0, (car.bumpCd || 0) - dt);
   // two AI cars that crashed sit still for a few seconds, then drive on
   // together until they've separated (otherwise they'd lock up for good)
   if(car.holdT > 0){ car.holdT -= dt; car.speed = 0; car.braking = true; return true; }
@@ -3257,10 +3304,13 @@ function checkCarContacts(car, dt){
     touching = true;
     const v = relativeSpeed(car, other);
     const canHurt = isPlayer ? player.crashCooldown <= 0 : (car.hitCooldown <= 0 && (other.hitCooldown || 0) <= 0);
-    if(v > 25 && canHurt){
+    const audible = dist2(car.x, car.z, player.x, player.z) < 120*120;
+    if(v <= 25){
+      if(audible && car.bumpCd <= 0){ SFX.bump(); car.bumpCd = 0.5; }
+    } else if(canHurt){
       const amount = clamp(v/220, 0, 2) * 50;
       car.hitCooldown = 2.5;
-      SFX.crash();
+      if(audible || isPlayer) SFX.crash();
       if(isPlayer){
         player.crashCooldown = 0.8;
         damage = clamp(damage + amount, 0, 100);
@@ -3435,7 +3485,6 @@ function updateStreetCar(car, dt){
     const playerHalfWidth = (VEHICLE_FOOTPRINT[player.type] || VEHICLE_FOOTPRINT.car)[0];
     const bodyOverlapTol = ownHalfWidth + playerHalfWidth - 4;
     if(nearestIsPlayer && nearestAhead < MIN_GAP*0.6 && nearestLateralGap < bodyOverlapTol && car.crashCooldown<=0){
-      SFX.crash();
       spookSuspectNear(car.x, car.z);
       car.crashCooldown = 1.5;
       speedTarget = 0;
@@ -6714,6 +6763,7 @@ function drawScene(){
   }
 
   for(const s of splats){
+    if(!bloodOn) break;
     const q = projectFace([[s.x-4,0.05,s.z-4],[s.x+4,0.05,s.z-4],[s.x+4,0.05,s.z+4],[s.x-4,0.05,s.z+4]], cam);
     if(q) polyFill(q, `rgba(120,18,18,${(0.85*(1-s.t/25)).toFixed(3)})`, null);
   }
