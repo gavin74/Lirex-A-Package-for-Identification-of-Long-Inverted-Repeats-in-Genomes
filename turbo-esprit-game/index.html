@@ -326,6 +326,9 @@ const CP_GROUND_END = 50;          // flat ground-floor entry, depth 0..this
 const CP_RAMP_END = 120;           // ramp climbs 0->CP_FLOOR_H over this span
 const CP_DECK_END = 190;           // flat upper deck; crossing this launches you
 const CP_LAUNCH_VY_MIN = 16, CP_LAUNCH_VY_MAX = 46;
+// the street-side lock-up: half-width, half-depth and height. Used by the
+// builder, the collision box and the garage placement, so keep them in one place
+const GARAGE_HW = 7, GARAGE_HZ = 5, GARAGE_H = 10;
 const LANE_OFFSET = 16;            // distance of each lane from the street centerline
 // was 70, then 130 -- even at 130 an empirical sweep (drive straight,
 // then do one ordinary lane change near traffic, repeated across many
@@ -467,6 +470,10 @@ const mctx = mapCanvas.getContext('2d');
 
 const worldHalfX = (BLOCKS_X * BLOCK) / 2;
 const worldHalfZ = (BLOCKS_Z * BLOCK) / 2;
+// the perimeter wall sits on the OUTER edge of the perimeter roads, not on
+// the grid line: those roads are centred on worldHalfX/Z and ROAD_HALF_MINOR
+// wide, so a wall on the grid line left half of each road outside the city
+const WALL_X = worldHalfX + ROAD_HALF_MINOR, WALL_Z = worldHalfZ + ROAD_HALF_MINOR;
 
 // ---------------------------------------------------------------
 // City generation
@@ -476,6 +483,7 @@ let gasPads = [];     // {x,z,r}
 let donutPads = [];   // same shape as gasPads, recoloured — see spawnDonutBreak
 let garages = [];     // {x,z,doorOpen,entrance} — cars occasionally pull in/out, see updateGarages
 let roadMarks = [];   // {x1,x2,z1,z2} dashed centerline segments
+let lotDecals = [];   // {x1,x2,z1,z2,color} flat ground rectangles: garage car park asphalt and its bay dividers
 let stopLines = [];   // {x1,x2,z1,z2} solid stop-line markings, one per approach to a signalled junction
 let walls = [];        // perimeter wall segments, same shape as a building box
 let roundabouts = [];  // {x,z,r} — see ROUNDABOUTS_ENABLED
@@ -640,11 +648,27 @@ function generateCity(seed){
         // civilian actually pulled out: it spawns at the garage (see
         // spawnCarAtGarage) then instantly snaps onto the real street lane
         // the very next frame, a jump proportional to this same distance.
-        // GARAGE_HALF_DEPTH must match buildGarageQuads' own hz.
-        const GARAGE_HALF_DEPTH = 9, GARAGE_FORECOURT = 20;
-        const gz = z1 + GARAGE_HALF_DEPTH + GARAGE_FORECOURT;
+        // the lock-up sits back from the curb with a car park across the
+        // front of the plot, and buildings either side running back to the
+        // rear, so it reads as part of the block rather than a box alone
+        const GARAGE_FORECOURT = 20;
+        const gz = z1 + GARAGE_HZ + GARAGE_FORECOURT;
         garages.push({x:cx, z:gz, doorOpen:0,
           entrance:{axis:'x', line: streetLinesZ[j], cross: gz-streetLinesZ[j], along: cx}});
+        // the car park: asphalt across the front, with a few short bay
+        // dividers painted on it. Only a handful of strips, so it reads as
+        // a lot rather than a striped field
+        const lotZ2 = gz - GARAGE_HZ;
+        lotDecals.push({x1, x2, z1, z2:lotZ2, color:'rgba(88,88,92,0.9)'});
+        const BAYS = 6;
+        for(let k=1;k<BAYS;k++){
+          const xk = x1 + (x2-x1)*k/BAYS;
+          lotDecals.push({x1:xk-0.35, x2:xk+0.35, z1:z1+6, z2:z1+12, color:'rgba(235,232,222,0.85)'});
+        }
+        // buildings flanking the lock-up, running from the car park back to the rear
+        const flankL = cx - GARAGE_HW - 4 - x1, flankR = x2 - (cx + GARAGE_HW + 4);
+        if(flankL > 12) buildings.push(makeBuildingAt(x1 + flankL/2, (lotZ2+z2)/2, flankL/2, (z2-lotZ2)/2, rnd));
+        if(flankR > 12) buildings.push(makeBuildingAt(x2 - flankR/2, (lotZ2+z2)/2, flankR/2, (z2-lotZ2)/2, rnd));
         continue;
       }
       // one block in ~7 is split into two buildings with a narrow alley
@@ -715,6 +739,7 @@ function generateCity(seed){
   }
 
   roadMarks = [];
+  lotDecals = [];
   const dashLen = 20, dashGap = 22, dashHalfWid = 1.4;
   const TURN_LANE_COLOR = 'rgba(214,190,100,0.85)';
   // arterials get a real 6-lane layout: a dashed yellow line dead center
@@ -823,20 +848,21 @@ function generateCity(seed){
   // player was already clamped to stay inside this boundary, now it's
   // visible instead of an invisible wall. One segment per block for a
   // bit of pillar-like rhythm along each side.
+  // the end segments run out to the corners so the wall has no gap there
   walls = [];
   for(let i=0;i<BLOCKS_Z;i++){
     const cz = cellCenter(i, BLOCKS_Z);
-    const z1 = cz-BLOCK/2, z2 = cz+BLOCK/2;
+    const z1 = i===0 ? -WALL_Z : cz-BLOCK/2, z2 = i===BLOCKS_Z-1 ? WALL_Z : cz+BLOCK/2;
     const shadeVar = (i%2===0) ? 1.0 : 0.9;
-    walls.push({x1:-worldHalfX-WALL_THICK, x2:-worldHalfX, z1, z2, h:WALL_HEIGHT, shadeVar});
-    walls.push({x1:worldHalfX, x2:worldHalfX+WALL_THICK, z1, z2, h:WALL_HEIGHT, shadeVar});
+    walls.push({x1:-WALL_X-WALL_THICK, x2:-WALL_X, z1, z2, h:WALL_HEIGHT, shadeVar});
+    walls.push({x1:WALL_X, x2:WALL_X+WALL_THICK, z1, z2, h:WALL_HEIGHT, shadeVar});
   }
   for(let i=0;i<BLOCKS_X;i++){
     const cx = cellCenter(i, BLOCKS_X);
-    const x1 = cx-BLOCK/2, x2 = cx+BLOCK/2;
+    const x1 = i===0 ? -WALL_X-WALL_THICK : cx-BLOCK/2, x2 = i===BLOCKS_X-1 ? WALL_X+WALL_THICK : cx+BLOCK/2;
     const shadeVar = (i%2===0) ? 1.0 : 0.9;
-    walls.push({x1, x2, z1:-worldHalfZ-WALL_THICK, z2:-worldHalfZ, h:WALL_HEIGHT, shadeVar});
-    walls.push({x1, x2, z1:worldHalfZ, z2:worldHalfZ+WALL_THICK, h:WALL_HEIGHT, shadeVar});
+    walls.push({x1, x2, z1:-WALL_Z-WALL_THICK, z2:-WALL_Z, h:WALL_HEIGHT, shadeVar});
+    walls.push({x1, x2, z1:WALL_Z, z2:WALL_Z+WALL_THICK, h:WALL_HEIGHT, shadeVar});
   }
 
   // two fixed "donut shop" forecourts — same canopy shape as a petrol
@@ -1152,16 +1178,18 @@ function generateCity(seed){
   // wall landed well inside that carriageway, in the middle of the
   // street traffic actually drives on, instead of clear of it against
   // the wall the way every other roadside prop is kept clear of the road
-  const bbOffset = ROAD_HALF_MINOR + 14;
+  // now the walls stand on the outer road edge, so these sit on the
+  // shoulder just inside the wall, their poles clear of the lanes
+  const bbInset = 8;
   const wallSides = [
-    {fixedAxis:'x', fixedVal: -worldHalfX+bbOffset, rangeMax: worldHalfZ, facing: Math.PI/2},
-    {fixedAxis:'x', fixedVal: worldHalfX-bbOffset, rangeMax: worldHalfZ, facing: -Math.PI/2},
-    {fixedAxis:'z', fixedVal: -worldHalfZ+bbOffset, rangeMax: worldHalfX, facing: 0},
-    {fixedAxis:'z', fixedVal: worldHalfZ-bbOffset, rangeMax: worldHalfX, facing: Math.PI}
+    {fixedAxis:'x', fixedVal: -WALL_X+bbInset, rangeMax: worldHalfZ, facing: Math.PI/2},
+    {fixedAxis:'x', fixedVal: WALL_X-bbInset, rangeMax: worldHalfZ, facing: -Math.PI/2},
+    {fixedAxis:'z', fixedVal: -WALL_Z+bbInset, rangeMax: worldHalfX, facing: 0},
+    {fixedAxis:'z', fixedVal: WALL_Z-bbInset, rangeMax: worldHalfX, facing: Math.PI}
   ];
   for(const side of wallSides){
-    for(let k=0;k<2;k++){
-      const along = (bbRnd()*1.4-0.7) * side.rangeMax;
+    for(let k=0;k<4;k++){
+      const along = (-0.66 + k*0.44) * side.rangeMax + (bbRnd()*0.2-0.1) * side.rangeMax;
       const slogan = BILLBOARD_SLOGANS[Math.floor(bbRnd()*BILLBOARD_SLOGANS.length)];
       const pos = side.fixedAxis==='x' ? {x: side.fixedVal, z: along} : {x: along, z: side.fixedVal};
       billboards.push({x: pos.x, z: pos.z, facing: side.facing, slogan});
@@ -3165,7 +3193,7 @@ function collideWorld(x, z, r, ignoreMedians, ignoreCar){
   // checks, just a fixed half-size since garages don't carry their own
   // x1/x2/z1/z2 the way a building object does
   for(const g of garages){
-    const cx = clamp(x, g.x-13, g.x+13), cz = clamp(z, g.z-9, g.z+9);
+    const cx = clamp(x, g.x-GARAGE_HW, g.x+GARAGE_HW), cz = clamp(z, g.z-GARAGE_HZ, g.z+GARAGE_HZ);
     if(dist2(x,z,cx,cz) < r*r) return true;
   }
   // the old vehicleR was a single circle (r+8) covering every direction
@@ -4908,7 +4936,7 @@ function buildStationQuads(pad){
 // than a flat closed panel once g.doorOpen rises (see updateGarages),
 // which is the only visual cue a car pulling in/out gets to sell it.
 function buildGarageQuads(g){
-  const hw = 13, hz = 9, h = 19;
+  const hw = GARAGE_HW, hz = GARAGE_HZ, h = GARAGE_H;
   const x1 = g.x-hw, x2 = g.x+hw, z1 = g.z-hz, z2 = g.z+hz;
   const body = 'rgb(198,193,182)', bodyDark = 'rgb(160,156,146)', roof = 'rgb(140,136,128)';
   const quads = [];
@@ -6053,7 +6081,7 @@ function buildBillboardQuads(bb){
   const s = Math.sin(bb.facing), c = Math.cos(bb.facing);
   function tw(lx, ly, lz){ return [bb.x + (lx*c + lz*s), ly, bb.z + (-lx*s + lz*c)]; }
   const quads = [];
-  const hw = 36, y0 = 20, y1 = 54;
+  const hw = 46, y0 = 26, y1 = 74;
   for(const lx of [-hw+6, hw-6]){
     quads.push({pts:[tw(lx-1.5,0,0),tw(lx-1.5,y0+2,0),tw(lx+1.5,y0+2,0),tw(lx+1.5,0,0)], color:'rgb(90,92,96)'});
   }
@@ -6204,7 +6232,9 @@ function buildOneWaySignQuads(sg){
   quads.push({pts:[[px-1,0,pz],[px-1,poleH,pz],[px+1,poleH,pz],[px+1,0,pz]], color:'rgb(140,142,146)'});
   quads.push({pts:[[px,0,pz-1],[px,poleH,pz-1],[px,poleH,pz+1],[px,0,pz+1]], color:'rgb(140,142,146)'});
   const cy = poleH+14, hw=8, hh=14;
-  const white = 'rgb(246,246,240)', black = 'rgb(20,20,22)';
+  // British one-way plate: blue, white arrow, no lettering. The var names
+  // are kept (white = plate, black = arrow) so the quads below stay put
+  const white = 'rgb(0,68,160)', black = 'rgb(246,246,240)';
   // arrow sits in the upper two-thirds; the bottom third is left clear for
   // the "ONE WAY" text painted on top in the post-pass
   const shaftY0 = cy-2, shaftY1 = cy+hh-6, headY1 = cy+hh-1;
@@ -6215,12 +6245,12 @@ function buildOneWaySignQuads(sg){
   // panel (tall, spans the whole plate) and get painted first, then
   // covered. A multi-unit offset keeps the z term dominant regardless.
   if(sg.axis==='z'){
-    quads.push({pts:[[px-hw-1,cy-hh-1,pz+2],[px-hw-1,cy+hh+1,pz+2],[px+hw+1,cy+hh+1,pz+2],[px+hw+1,cy-hh-1,pz+2]], color:black});
+    quads.push({pts:[[px-hw-1,cy-hh-1,pz+2],[px-hw-1,cy+hh+1,pz+2],[px+hw+1,cy+hh+1,pz+2],[px+hw+1,cy-hh-1,pz+2]], color:white});
     quads.push({pts:[[px-hw,cy-hh,pz],[px-hw,cy+hh,pz],[px+hw,cy+hh,pz],[px+hw,cy-hh,pz]], color:white});
     quads.push({pts:[[px-1.3,shaftY0,pz-4],[px-1.3,shaftY1,pz-4],[px+1.3,shaftY1,pz-4],[px+1.3,shaftY0,pz-4]], color:black});
     quads.push({pts:[[px-4.2,shaftY1,pz-4],[px,headY1,pz-4],[px+4.2,shaftY1,pz-4],[px,shaftY1,pz-4]], color:black});
   } else {
-    quads.push({pts:[[px,cy-hh-1,pz-hw-1],[px,cy+hh+1,pz-hw-1],[px,cy+hh+1,pz+hw+1],[px,cy-hh-1,pz+hw+1]], color:black});
+    quads.push({pts:[[px,cy-hh-1,pz-hw-1],[px,cy+hh+1,pz-hw-1],[px,cy+hh+1,pz+hw+1],[px,cy-hh-1,pz+hw+1]], color:white});
     quads.push({pts:[[px-2,cy-hh,pz-hw],[px-2,cy+hh,pz-hw],[px-2,cy+hh,pz+hw],[px-2,cy-hh,pz+hw]], color:white});
     quads.push({pts:[[px-4,shaftY0,pz-1.3],[px-4,shaftY1,pz-1.3],[px-4,shaftY1,pz+1.3],[px-4,shaftY0,pz+1.3]], color:black});
     quads.push({pts:[[px-4,shaftY1,pz-4.2],[px-4,headY1,pz],[px-4,shaftY1,pz+4.2],[px-4,shaftY1,pz]], color:black});
@@ -6822,6 +6852,13 @@ function drawScene(){
     const proj = projectFace(pts, cam);
     if(proj) polyFill(proj, m.color || 'rgba(224,222,208,0.8)', null);
   }
+  for(const m of lotDecals){
+    const mx=(m.x1+m.x2)/2, mz=(m.z1+m.z2)/2;
+    if(dist2(cam.x,cam.z,mx,mz) > markRangeSq) continue;
+    const pts = [[m.x1,0.15,m.z1],[m.x2,0.15,m.z1],[m.x2,0.15,m.z2],[m.x1,0.15,m.z2]];
+    const proj = projectFace(pts, cam);
+    if(proj) polyFill(proj, m.color, null);
+  }
 
   for(const sl of stopLines){
     const mx=(sl.x1+sl.x2)/2, mz=(sl.z1+sl.z2)/2;
@@ -7184,7 +7221,7 @@ function drawScene(){
   for(const bb of billboards){
     if(dist2(cam.x,cam.z,bb.x,bb.z) > (RENDER_DIST*0.6)*(RENDER_DIST*0.6)) continue;
     const s = Math.sin(bb.facing), c = Math.cos(bb.facing);
-    const wx = bb.x + 0.6*s, wz = bb.z + 0.6*c, wy = 37;
+    const wx = bb.x + 0.6*s, wz = bb.z + 0.6*c, wy = 50;
     let occluded = false;
     for(const b of buildings){
       if(segmentHitsBox(cam.x, cam.z, wx, wz, b.x1, b.x2, b.z1, b.z2)){ occluded = true; break; }
@@ -7194,40 +7231,17 @@ function drawScene(){
     if(camP.z <= NEAR) continue;
     const screen = toScreen(camP);
     if(screen.x < -200 || screen.x > W+200 || screen.y < -100 || screen.y > H+100) continue;
-    const scaleByLen = clamp(16/bb.slogan.length, 0.4, 1);
-    const fontSize = clamp(1900/camP.z * scaleByLen, 6, 30);
+    // true perspective size: the lettering fills the 92-unit wide panel
+    // (about 82% of it), so it grows and shrinks with the board as you
+    // approach. Height in world units is 125.7/len, and screen pixels per
+    // world unit are FOV_FOCAL/depth
+    const fontSize = clamp(125.7/bb.slogan.length * FOV_FOCAL / camP.z, 2, 400);
     ctx.save();
     ctx.font = `bold ${fontSize}px monospace`;
     ctx.fillStyle = 'rgba(25,24,28,0.92)';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(bb.slogan, screen.x, screen.y);
-    ctx.restore();
-  }
-
-  // "ONE WAY" text on each sign's lower third, same real-canvas-text +
-  // building-occlusion treatment as the billboard slogans above
-  for(const sg of oneWaySigns){
-    if(dist2(cam.x,cam.z,sg.x,sg.z) > (RENDER_DIST*0.6)*(RENDER_DIST*0.6)) continue;
-    const wx = sg.axis==='x' ? sg.x-0.3 : sg.x;
-    const wz = sg.axis==='z' ? sg.z-0.3 : sg.z;
-    const wy = 30;
-    let occluded = false;
-    for(const b of buildings){
-      if(segmentHitsBox(cam.x, cam.z, wx, wz, b.x1, b.x2, b.z1, b.z2)){ occluded = true; break; }
-    }
-    if(occluded) continue;
-    const camP = toCamSpace(wx, wy, wz, cam);
-    if(camP.z <= NEAR) continue;
-    const screen = toScreen(camP);
-    if(screen.x < -200 || screen.x > W+200 || screen.y < -100 || screen.y > H+100) continue;
-    const fontSize = clamp(900/camP.z, 4, 13);
-    ctx.save();
-    ctx.font = `bold ${fontSize}px monospace`;
-    ctx.fillStyle = 'rgba(20,20,22,0.95)';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('ONE WAY', screen.x, screen.y);
     ctx.restore();
   }
 
@@ -7248,7 +7262,7 @@ function drawScene(){
     if(camP.z <= NEAR) return;
     const screen = toScreen(camP);
     if(screen.x < -200 || screen.x > W+200 || screen.y < -100 || screen.y > H+100) return;
-    const fontSize = clamp(scale/camP.z, 3, 9);
+    const fontSize = clamp(scale/camP.z, 2, 400);
     ctx.save();
     ctx.font = `bold ${fontSize}px monospace`;
     ctx.fillStyle = 'rgba(246,246,240,0.95)';
