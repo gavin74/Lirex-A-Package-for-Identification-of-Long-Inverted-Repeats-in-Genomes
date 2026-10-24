@@ -3561,9 +3561,9 @@ function checkCarContacts(car, dt){
       const along = car.axis==='z' ? (p.z-car.z)*car.dir : (p.x-car.x)*car.dir;
       const across = car.axis==='z' ? Math.abs(p.x-car.x) : Math.abs(p.z-car.z);
       if(along > -half-1 && along < half+1 && across < hw + 2){
+        // the walker simply vanishes (see pedDown) with a thump, no splat
         pedDown[p.id] = worldTime + 30;
-        splats.push({x: p.x, z: p.z, t: 0});
-        SFX.screech();
+        SFX.bump(0.6);
         car.speed *= 0.6;
       }
     }
@@ -3932,8 +3932,9 @@ function checkPlayerViolations(dt){
   for(const p of pedestrianPositions()){
     if(dist2(player.x,player.z,p.x,p.z) < 12*12 && Math.abs(player.speed) > 15){
       triggerWanted('HIT A PEDESTRIAN');
+      // they vanish (see pedDown) with a thump, no splat
       pedDown[p.id] = worldTime + 30;
-      splats.push({x: p.x, z: p.z, t: 0});
+      SFX.bump(0.9);
       // same bounded bleed-down as clipping traffic (see hazardSlowT near
       // the top of updatePlayer) instead of a one-frame snap to 30%
       player.hazardSlowFloor = Math.abs(player.speed) * 0.3;
@@ -6480,8 +6481,12 @@ function pedestrianPositions(){
     const {ph, wave, movingBack} = walkPhase(i, worldTime, 7, 9);
     const span = cr.roadHalf*2 - 10;
     const off = wave * span/2;
-    const pos = cr.axis==='z' ? {x:cr.x+off, z:cr.z-8} : {x:cr.x-8, z:cr.z+off};
-    const baseFacing = cr.axis==='z' ? Math.PI/2 : 0;
+    // cr.axis is the way this crossing's walkers move (set where crossings
+    // are built): 'x' walks across an N-S street, 'z' across an E-W one.
+    // This used to be the other way round, which walked half the crossing
+    // pedestrians along the carriageway instead of across it
+    const pos = cr.axis==='x' ? {x:cr.x+off, z:cr.z-8} : {x:cr.x-8, z:cr.z+off};
+    const baseFacing = cr.axis==='x' ? Math.PI/2 : 0;
     list.push({id:'c'+i, x:pos.x, z:pos.z, facing: movingBack?baseFacing+Math.PI:baseFacing, color:PED_COLORS[i%PED_COLORS.length], walk:ph});
   }
   // sidewalk beats: a pedestrian ambling along the curb, parallel to the
