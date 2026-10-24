@@ -1307,6 +1307,64 @@ function startWreck(reason){
   shakeTimer = SHAKE_DURATION;
   wreckFx = {x: player.x, y: player.y, z: player.z, t: 0, reason};
 }
+// vehicles blown up this round are replaced after a short gap so traffic
+// density holds; the replacement is the same kind of car as the one lost
+const RESPAWN_DELAY = 25;
+let respawns = [];
+let blasts = [];      // {x,y,z,t} explosion fireballs for destroyed vehicles
+let damagePops = [];  // {text,x,y,z,t} floating "-N%" numbers anchored to a car
+let impactFlash = 0;  // 0..1 red edge flash when the player takes a crash
+function trafficListFor(type){
+  const map = {car:()=>civilians, police:()=>police, ambulance:()=>ambulances, firetruck:()=>fireTrucks,
+    dumptruck:()=>dumpTrucks, bigrig:()=>bigRigs, streetsweeper:()=>streetSweepers, bus:()=>buses,
+    motorbike:()=>motorbikes, van:()=>vans, ebike:()=>ebikes};
+  return map[type] ? map[type]() : null;
+}
+function damageVehicle(car, amount){
+  if(!car || car===player || car===suspect || !(amount > 0)) return;
+  car.damage = (car.damage || 0) + amount;
+  damagePops.push({text: '-' + Math.round(amount) + '%', x: car.x, y: 16, z: car.z, t: 0});
+  if(car.damage >= 100) blowUpVehicle(car);
+}
+function blowUpVehicle(car){
+  for(const list of [police, ambulances, fireTrucks, dumpTrucks, bigRigs, streetSweepers, buses, motorbikes, vans, ebikes, civilians]){
+    if(!list) continue;
+    const i = list.indexOf(car);
+    if(i >= 0){ list.splice(i, 1); break; }
+  }
+  blasts.push({x: car.x, y: 4, z: car.z, t: 0});
+  SFX.explosion();
+  if(car.spawnArgs) respawns.push({at: worldTime + RESPAWN_DELAY, type: car.type, args: car.spawnArgs});
+}
+// a car cleared the far end of its own footprint-based hit box
+function vehicleHitBox(car, x, z, pad){
+  const dx = x - car.x, dz = z - car.z;
+  const along = car.axis==='z' ? Math.abs(dz) : Math.abs(dx);
+  const across = car.axis==='z' ? Math.abs(dx) : Math.abs(dz);
+  const hw = (VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car)[0];
+  return along < vehicleHalfLength(car) + pad && across < hw + pad;
+}
+function updateRespawns(){
+  for(let i = respawns.length-1; i >= 0; i--){
+    const r = respawns[i];
+    if(worldTime < r.at) continue;
+    respawns.splice(i, 1);
+    const list = trafficListFor(r.type);
+    if(list) list.push(spawnStreetCar(...r.args));
+  }
+}
+function updateEffects(dt){
+  for(const b of blasts) b.t += dt;
+  blasts = blasts.filter(b => b.t < 1.4);
+  for(const p of damagePops) p.t += dt;
+  damagePops = damagePops.filter(p => p.t < 1.2);
+  impactFlash = Math.max(0, impactFlash - dt*1.6);
+}
+function onPlayerDamage(added){
+  impactFlash = Math.max(impactFlash, clamp(added/35, 0.35, 1));
+  damagePops.push({text: '-' + Math.round(added) + '%', x: player.x, y: player.y + 24, z: player.z, t: 0});
+}
+
 function updateWreck(dt){
   if(!wreckFx) return;
   wreckFx.t += dt;
@@ -1470,6 +1528,8 @@ function spawnStreetCar(color, speed, type){
   const c = makeCar(p.x, p.z, Math.random()<0.5?0:Math.PI, color, actualSpeed);
   c.speed = actualSpeed;  // AI traffic cruises at a constant speed, no accelerating
   c.type = type || 'car';
+  c.damage = 0;
+  c.spawnArgs = [color, speed, c.type];
   c.axis = Math.random()<0.5 ? 'x' : 'z';
   c.dir = Math.random()<0.5 ? 1 : -1;
   const forcedDir = oneWayDir(c.axis, c.axis==='z' ? p.x : p.z);
@@ -2861,6 +2921,8 @@ function updatePlayer(dt){
         ? clamp(impactSpeed/player.maxSpeed, 0, 2) * 50
         : clamp(impactSpeed/player.maxSpeed, 0, 1) * 22;
       damage = clamp(damage + damageAdd, 0, 100);
+      onPlayerDamage(damageAdd);
+      damageVehicle(hitVehicle, damageAdd);
       showBanner('CRASH!', 0.6);
       player.crashCooldown = 0.8;
       SFX.crash();
@@ -3851,6 +3913,12 @@ function updateBullets(dt){
       gone = true;
     } else if(collideBuildings(b.x, b.z, 2)){
       gone = true;
+    } else {
+      const hitCar = allTraffic().find(car => vehicleHitBox(car, b.x, b.z, 2));
+      if(hitCar){
+        damageVehicle(hitCar, 25);
+        gone = true;
+      }
     }
     if(gone) bullets.splice(i,1);
   }
@@ -3860,6 +3928,7 @@ function update(dt){
   if(gameState !== 'playing') return;
 
   worldTime += dt;
+  updateRespawns();
   if(shakeTimer > 0) shakeTimer -= dt;
   updateBlink(dt);
   updateWindowFlicker(dt);
@@ -4828,8 +4897,9 @@ function buildBrakeGlow(car){
 // burns.
 const FLAME_DAMAGE_THRESHOLD = 65;
 function buildDamageFlames(car){
-  if(car !== player || damage < FLAME_DAMAGE_THRESHOLD) return [];
-  const t = clamp((damage-FLAME_DAMAGE_THRESHOLD)/(100-FLAME_DAMAGE_THRESHOLD), 0, 1);
+  const dmg = car===player ? damage : (car.damage || 0);
+  if(dmg < FLAME_DAMAGE_THRESHOLD) return [];
+  const t = clamp((dmg-FLAME_DAMAGE_THRESHOLD)/(100-FLAME_DAMAGE_THRESHOLD), 0, 1);
   const d = VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car;
   const s = Math.sin(car.heading), c = Math.cos(car.heading);
   function tw(lx, ly, lz){ return [car.x + (lx*c + lz*s), ly, car.z + (-lx*s + lz*c)]; }
@@ -6896,19 +6966,23 @@ function drawScene(){
   }
 
   drawWreck(cam);
+  for(const b of blasts) drawBlast(b, 1.4, cam, false);
+  drawDamagePops(cam);
+  drawImpactFlash();
   drawRain();
   drawLightning();
 }
 
-function drawWreck(cam){
-  if(!wreckFx) return;
-  const p = clamp(wreckFx.t/WRECK_DELAY, 0, 1);
-  const flash = Math.max(0, 1 - wreckFx.t/0.25);
-  if(flash > 0){
-    ctx.fillStyle = `rgba(255,248,225,${(flash*0.85).toFixed(3)})`;
-    ctx.fillRect(0,0,W,H);
+function drawBlast(fx, dur, cam, withFlash){
+  const p = clamp(fx.t/dur, 0, 1);
+  if(withFlash){
+    const flash = Math.max(0, 1 - fx.t/0.25);
+    if(flash > 0){
+      ctx.fillStyle = `rgba(255,248,225,${(flash*0.85).toFixed(3)})`;
+      ctx.fillRect(0,0,W,H);
+    }
   }
-  const sc = toCamSpace(wreckFx.x, wreckFx.y + 8, wreckFx.z, cam);
+  const sc = toCamSpace(fx.x, fx.y + 8, fx.z, cam);
   if(sc.z <= NEAR) return;
   const sp = toScreen(sc);
   const worldR = 14 + 30*Math.sqrt(p);
@@ -6934,6 +7008,37 @@ function drawWreck(cam){
     ctx.fillStyle = i%3===0 ? `rgba(255,170,60,${(1-p).toFixed(3)})` : `rgba(45,42,40,${(1-p*0.6).toFixed(3)})`;
     ctx.fillRect(dx - size/2, dy - size/2, size, size);
   }
+}
+
+function drawWreck(cam){
+  if(!wreckFx) return;
+  drawBlast(wreckFx, WRECK_DELAY, cam, true);
+}
+
+// floating "-N%" numbers rising from where the damage landed, fading out
+function drawDamagePops(cam){
+  for(const pop of damagePops){
+    const sc = toCamSpace(pop.x, pop.y + pop.t*18, pop.z, cam);
+    if(sc.z <= NEAR) continue;
+    const sp = toScreen(sc);
+    const k = pop.t/1.2;
+    ctx.save();
+    ctx.globalAlpha = 1 - k;
+    ctx.font = '14px "Press Start 2P", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff5a48';
+    ctx.fillText(pop.text, sp.x, sp.y);
+    ctx.restore();
+  }
+}
+
+function drawImpactFlash(){
+  if(impactFlash < 0.01) return;
+  const g = ctx.createRadialGradient(W/2, H/2, H*0.3, W/2, H/2, H*0.85);
+  g.addColorStop(0, 'rgba(200,30,20,0)');
+  g.addColorStop(1, `rgba(200,30,20,${(impactFlash*0.55).toFixed(3)})`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
 }
 
 // squared 3D distance from the camera to a face's centroid — used as the
@@ -7218,6 +7323,7 @@ function frame(t){
   updateRain(dt);
   update(dt);
   updateWreck(dt);
+  updateEffects(dt);
   updateChatter(dt);
   updateGarages(dt);
   if(player){
