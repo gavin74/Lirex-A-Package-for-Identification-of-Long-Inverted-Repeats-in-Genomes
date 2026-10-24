@@ -1295,8 +1295,12 @@ let shakeTimer = 0; // camera shake on impact — not a physics engine, but it r
 // and debris at the car's position, then the WRECKED / dog panel
 const WRECK_DELAY = 1.8;
 let wreckFx = null; // {x,y,z,t,reason} while the explosion plays, null otherwise
+let playerWrecked = false; // the car is gone once it has blown up; only the fireball remains
 function startWreck(reason){
   gameState = 'over';
+  playerWrecked = true;
+  SFX.sirenStop();
+  ClubAudio.update({jazz:0, rock:0, dance:0}, true);
   player.speed = 0;
   Engine.update(0, 1, false, false);
   SFX.explosion();
@@ -1349,6 +1353,7 @@ function spawnPlayerStart(){
 function resetGame(){
   document.getElementById('overlay').classList.add('hidden');
   wreckFx = null;
+  playerWrecked = false;
   generateCity(Date.now() % 100000);
   player = spawnPlayerStart();
   score = 0; caught = 0; fuel = START_FUEL; damage = 0;
@@ -1763,7 +1768,7 @@ const Engine = (function(){
     chugLfo = ac.createOscillator(); chugLfo.type = 'sine'; chugLfo.frequency.value = 9;
     chugShaper = ac.createWaveShaper();
     chugShaper.curve = chugCurve();
-    chugDepth = ac.createGain(); chugDepth.gain.value = 0.35;
+    chugDepth = ac.createGain(); chugDepth.gain.value = 0.18;
     chugLfo.connect(chugShaper);
     chugShaper.connect(chugDepth);
     chugDepth.connect(chugGain.gain);
@@ -1833,9 +1838,11 @@ const Engine = (function(){
     const spd = Math.abs(speed);
     const GEARS = 4;
     const span = maxSpeed / GEARS;
-    const gearPos = spd <= 1 ? 0 : (spd % span) / span;
+    // one continuous rev curve from road speed -- a per-gear sawtooth dropped
+    // the pitch back to idle at every gear change, which read as a cough
+    const revCurve = Math.pow(clamp(spd/maxSpeed, 0, 1), 0.8);
     const idleHz = 55, revHz = 190;
-    const baseHz = idleHz + gearPos * (revHz - idleHz);
+    const baseHz = idleHz + revCurve * (revHz - idleHz);
 
     // a slow, deterministic wobble (two summed sines, not per-frame
     // randomness — raw Math.random() every tick would just turn into
@@ -1849,7 +1856,7 @@ const Engine = (function(){
 
     // chug rate climbs with revs — distinct "putt-putt" at idle, blurs
     // into a faster pulse at speed, which is how a real engine behaves
-    chugLfo.frequency.setTargetAtTime(9 + gearPos*15, now, 0.15);
+    chugLfo.frequency.setTargetAtTime(9 + revCurve*15, now, 0.15);
 
     const throttleBoost = throttleOn ? 1 : 0;
     // cutoff tracks the fundamental, but deliberately duller than a real
@@ -1878,7 +1885,7 @@ const Engine = (function(){
         if(!engineLayers[i]) continue;
         const w = Math.max(0, 1 - Math.abs(pos - i));
         engineLayers[i].gain.gain.setTargetAtTime(w, now, 0.08);
-        engineLayers[i].src.playbackRate.setTargetAtTime(0.85 + gearPos*0.3, now, 0.1);
+        engineLayers[i].src.playbackRate.setTargetAtTime(0.85 + revCurve*0.3, now, 0.1);
       }
       sampleVol = 0.42 + Math.min(spd/maxSpeed, 1)*0.3 + throttleBoost*0.1;
       sampleBus.gain.setTargetAtTime(muted ? 0 : sampleVol, now, 0.1);
@@ -2962,7 +2969,7 @@ function collideWorld(x, z, r, ignoreMedians){
     const dx = x-c.x, dz = z-c.z;
     const along = c.axis==='z' ? Math.abs(dz) : Math.abs(dx);
     const across = c.axis==='z' ? Math.abs(dx) : Math.abs(dz);
-    if(along < longMargin && across < latMargin){ lastVehicleHit = c; return true; }
+    if(along < Math.max(longMargin, vehicleHalfLength(c)+2) && across < latMargin){ lastVehicleHit = c; return true; }
   }
   if(suspect){
     const dx = x-suspect.x, dz = z-suspect.z;
@@ -2990,6 +2997,10 @@ let lastVehicleHit = null;
 // same-direction/opposite-direction/perpendicular) gets all three right
 // with one formula: it comes out small for a gentle rear-end, large for
 // a head-on, and in between for a T-bone at a junction.
+function vehicleHalfLength(car){
+  const d = VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car;
+  return Math.max(Math.abs(d[1]), Math.abs(d[2]));
+}
 function closingSpeed(car){
   const pvx = player.axis==='z' ? 0 : player.dir*player.speed;
   const pvz = player.axis==='z' ? player.dir*player.speed : 0;
@@ -3267,6 +3278,16 @@ function updateStreetCar(car, dt){
       spookSuspectNear(car.x, car.z);
       car.crashCooldown = 1.5;
       speedTarget = 0;
+    }
+  }
+  // pedestrians and dogs in this lane ahead: ease off and stop short of them
+  for(const p of [...pedestrianPositions(), ...dogPositions()]){
+    const pForward = car.axis==='z' ? p.z : p.x;
+    const pCross = car.axis==='z' ? p.x : p.z;
+    const ahead = (pForward - forward) * car.dir;
+    if(ahead > 0 && ahead < BRAKE_DIST && Math.abs(crossPos - pCross) < 13){
+      const frac = clamp((ahead - 6)/(BRAKE_DIST - 6), 0, 1);
+      speedTarget = Math.min(speedTarget, car.maxSpeed * frac);
     }
   }
   if(car.speed < speedTarget) car.speed = Math.min(speedTarget, car.speed + 90*dt);
@@ -3930,6 +3951,13 @@ function showBanner(msg, secs){
 }
 
 function showEndPanel(reason){
+  // update() stops running once the game is over, so anything it was
+  // driving keeps sounding unless it's silenced here: the siren, the club
+  // loops and the engine
+  SFX.sirenStop();
+  wantedTimer = 0;
+  ClubAudio.update({jazz:0, rock:0, dance:0}, true);
+  Engine.update(0, 1, false, false);
   const overlay = document.getElementById('overlay');
   overlay.classList.remove('hidden');
   overlay.innerHTML = `
@@ -6708,7 +6736,7 @@ function drawScene(){
     }
   }
   for(const car of allCars()){
-    if(car===player && cameraMode==='incar') continue;
+    if(car===player && (cameraMode==='incar' || playerWrecked)) continue;
     // AI driving logic still runs city-wide every frame (see update()) —
     // this only skips building and projecting the full 3D quad set for a
     // car nowhere near the camera, same distance culling buildings and
