@@ -336,6 +336,7 @@ const LANE_OFFSET = 16;            // distance of each lane from the street cent
 // false hits to zero across ten runs. Faster lane changes shrink the exposure
 // window; see latMargin below for the other half of this fix.
 const LANE_SPEED = 220;
+const HOP_HEIGHT = 4.5;            // how high the car lifts mounting a central reservation (see player.hop)
 const TURN_RATE = 3.6;             // rad/sec every car's visual heading animates at —
                                     // slow enough that a turn clearly reads as motion
                                     // instead of snapping/blinking into the new heading
@@ -1318,6 +1319,38 @@ let impactFlash = 0;  // 0..1 red edge flash when the player takes a crash
 let pedDown = {};     // walker id -> worldTime when they're back on their feet
 let splats = [];      // {x,z,t} blood on the road where a walker was hit
 let walkersThisFrame = [];
+// motorbikes and e-bikes are knocked over rather than contacted: they fall
+// flat where the car clips them, stay down a few seconds, then are replaced
+function isBike(car){ return car.type === 'motorbike' || car.type === 'ebike'; }
+function knockBikes(){
+  const bikes = [...(motorbikes||[]), ...(ebikes||[])].filter(b => !b.fallen);
+  if(!bikes.length) return;
+  for(const car of [player, ...allTraffic()]){
+    if(isBike(car) || (car===player && playerWrecked)) continue;
+    for(const b of bikes){
+      if(b.fallen || Math.abs(b.x-car.x) > 40 || Math.abs(b.z-car.z) > 40) continue;
+      if(!carsOverlap(car, b, 2)) continue;
+      b.fallen = true; b.fallT = 0; b.speed = 0;
+      SFX.bump(0.1);
+      if(car===player){ damage = clamp(damage + 1.5, 0, 100); onPlayerDamage(1.5); }
+      else damageVehicle(car, 1);
+    }
+  }
+}
+function updateFallenBikes(dt){
+  for(const list of [motorbikes, ebikes]){
+    if(!list) continue;
+    for(let i = list.length-1; i >= 0; i--){
+      const b = list[i];
+      if(!b.fallen) continue;
+      b.fallT += dt;
+      if(b.fallT > 6){
+        list.splice(i, 1);
+        if(b.spawnArgs) respawns.push({at: worldTime + RESPAWN_DELAY, type: b.type, args: b.spawnArgs});
+      }
+    }
+  }
+}
 let skidMarks = [];   // ground tyre marks, kept for the round
 let tyreSmoke = [];   // {x,y,z,t} grey puffs from skidding tyres
 let bloodOn = false; // blood on the road where walkers are hit -- off by default
@@ -2287,7 +2320,7 @@ const SFX = (function(){
   }
 
   // a soft, low knock for a slow contact -- no smash, no damage
-  function bump(){
+  function bump(vol){
     const ac = ctx();
     if(!ac || Engine.isMuted) return;
     const now = ac.currentTime;
@@ -2297,7 +2330,7 @@ const SFX = (function(){
     for(let i=0;i<len;i++) d[i] = (Math.random()*2-1)*(1-i/len);
     const src = ac.createBufferSource(); src.buffer = buf;
     const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 380;
-    const g = ac.createGain(); g.gain.setValueAtTime(0.06, now);
+    const g = ac.createGain(); g.gain.setValueAtTime(vol || 0.06, now);
     src.connect(lp); lp.connect(g); g.connect(ac.destination); src.start(now);
   }
   return { crash, bump, bust, gunshot, horn, screech, sirenStart, sirenStop, thunder, explosion };
@@ -2557,7 +2590,14 @@ function changeLane(side){
     const newLane = side==='left' ? -rightSign : rightSign;
     // a central reservation can't be driven across mid-block: refusing the
     // change is better than the car being shoved through it (see collideWorld)
-    if(newLane !== player.lane && medianNear()){ showBanner('NO CROSSING', 0.6); return; }
+    if(newLane !== player.lane && medianNear() && !player.hop){
+      // the car mounts the central reservation: a short hop with an
+      // inverted-U arc, leaning toward the way it's going. No damage.
+      const from = player.laneOffset, to = newLane * LANE_OFFSET;
+      player.hop = {from, to, t: 0, dur: 0.6, sign: Math.sign(to - from), tilt: 0};
+      SFX.bump(0.16);
+      shakeTimer = Math.max(shakeTimer, SHAKE_DURATION*0.5);
+    }
     player.lane = newLane;
   } else {
     // an arterial has real lanes to step through rather than just the one
@@ -2804,7 +2844,19 @@ function updatePlayer(dt){
   // lane sits out while one is in progress -- it resumes once the arc
   // finishes and the car has a normal straight-line lane to ease into.
   const prevLaneOffset = player.laneOffset;
-  if(!player.arcTurn){
+  if(player.hop){
+    const h = player.hop;
+    h.t += dt;
+    const p = Math.min(1, h.t/h.dur);
+    player.laneOffset = h.from + (h.to - h.from) * (p*p*(3 - 2*p));
+    player.y = HOP_HEIGHT * Math.sin(Math.PI*p);
+    h.tilt = h.sign * 0.14 * Math.sin(Math.PI*p);
+    if(p >= 1){
+      player.laneOffset = h.to;
+      player.y = 0;
+      player.hop = null;
+    }
+  } else if(!player.arcTurn){
     const targetOffset = player.parkPad ? player.parkPad.cross
       : player.carPark ? player.carPark.entrance.cross
       : (laneCenterOffset(player.lane, playerLaneCount) + avoid);
@@ -2847,6 +2899,7 @@ function updatePlayer(dt){
   player.roll = player.arcTurn
     ? player.arcTurn.turnSign * (1 - player.arcTurn.sweep/(Math.PI/2)) * 0.26 * speedFrac
     : clamp(headingGap/(Math.PI/2), -1, 1) * 0.26 * speedFrac;
+  if(player.hop) player.roll = player.hop.tilt;
 
   // tires screech on a hard, fast turn or a hard stop from speed. Each
   // screech clip is only ~0.45s, but a corner arc taken at real speed
@@ -2971,7 +3024,7 @@ function updatePlayer(dt){
     rx = nx; rz = nz;
   } else {
     rx = player.x; rz = player.z;
-    const skipMedians = !!player.arcTurn || player.turnSettleT > 0;
+    const skipMedians = !!player.arcTurn || player.turnSettleT > 0 || !!player.hop;
     // already touching a car (e.g. one that drove into a stopped player):
     // steps that take the player further away from it aren't blocked by it,
     // otherwise every reverse press re-registers as a crash and zeroes speed
@@ -3139,7 +3192,7 @@ function collideWorld(x, z, r, ignoreMedians, ignoreCar){
   // above, cut that same sweep's lateral false hits to zero across ten runs.
   const longMargin = r+8, latMargin = r-7;
   for(const c of allTraffic()){
-    if(c===ignoreCar) continue;
+    if(c===ignoreCar || c.fallen || isBike(c)) continue;
     const dx = x-c.x, dz = z-c.z;
     const along = c.axis==='z' ? Math.abs(dz) : Math.abs(dx);
     const across = c.axis==='z' ? Math.abs(dx) : Math.abs(dz);
@@ -3328,17 +3381,30 @@ function relativeSpeed(a, b){
   const vbx = b.axis==='z' ? 0 : b.dir*b.speed, vbz = b.axis==='z' ? b.dir*b.speed : 0;
   return Math.hypot(vax-vbx, vaz-vbz);
 }
+// what a crashed car does next: back away, unless it's too wrecked to move
+function setCrashRecovery(k){
+  if((k.damage || 0) > 75){ k.holdT = 9999; k.reverseT = 0; }
+  else { k.holdT = 0; k.reverseT = 1.6; }
+}
 // returns true while the car is in contact, and holds it still
 function checkCarContacts(car, dt){
   car.hitCooldown = Math.max(0, (car.hitCooldown || 0) - dt);
   car.bumpCd = Math.max(0, (car.bumpCd || 0) - dt);
   // two AI cars that crashed sit still for a few seconds, then drive on
   // together until they've separated (otherwise they'd lock up for good)
+  // after a contact a car backs away from it; one too badly damaged to move
+  // (over 75%) stays where it stopped
+  if(car.reverseT > 0){
+    car.reverseT -= dt;
+    if(car.axis==='z') car.z -= car.dir*40*dt; else car.x -= car.dir*40*dt;
+    car.speed = 0; car.braking = true;
+    return true;
+  }
   if(car.holdT > 0){ car.holdT -= dt; car.speed = 0; car.braking = true; return true; }
   if(car.ignoreCar && !carsOverlap(car, car.ignoreCar, 16)) car.ignoreCar = null;
   let touching = false;
   for(const other of [player, ...allTraffic()]){
-    if(other===car || other===car.ignoreCar) continue;
+    if(other===car || other===car.ignoreCar || other.fallen || isBike(other)) continue;
     if(Math.abs(other.x-car.x) > 70 || Math.abs(other.z-car.z) > 70) continue;
     const isPlayer = other===player;
     // the player's own contact (updatePlayer) is the tight one; AI bodies
@@ -3365,9 +3431,10 @@ function checkCarContacts(car, dt){
         other.hitCooldown = 2.5;
         damageVehicle(other, amount);
         car.ignoreCar = other; other.ignoreCar = car;
-        car.holdT = 3; other.holdT = 3;
       }
       damageVehicle(car, amount);
+      setCrashRecovery(car);
+      if(!isPlayer) setCrashRecovery(other);
     }
   }
   // walkers: anything moving through a pedestrian or dog in its lane knocks
@@ -3392,6 +3459,7 @@ function checkCarContacts(car, dt){
 }
 
 function updateStreetCar(car, dt){
+  if(car.fallen){ car.speed = 0; return; }
   if(checkOilSlick(car, dt)){ car.braking = true; return; }
   if(checkCarContacts(car, dt)) return;
   if(car.arcTurn){ updateStreetCarArc(car, dt); return; }
@@ -3479,7 +3547,7 @@ function updateStreetCar(car, dt){
   let nearestAhead = Infinity, nearestIsPlayer = false, nearestLateralGap = Infinity;
   const ownHalfWidth = (VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car)[0];
   const checkAhead = (other) => {
-    if(!other || other === car || other === car.ignoreCar) return;
+    if(!other || other === car || other === car.ignoreCar || other.fallen) return;
     const oForward = car.axis==='z' ? other.z : other.x;
     const oCross = car.axis==='z' ? other.x : other.z;
     const aheadDist = (oForward - forward) * car.dir;
@@ -5124,6 +5192,12 @@ function buildDamageFlames(car){
 }
 
 function buildVehicleQuads(car){
+  if(car.fallen){
+    const s = Math.sin(car.heading), co = Math.cos(car.heading);
+    const tw = (lx, lz) => [car.x + lx*co + lz*s, 0.6, car.z - lx*s + lz*co];
+    const col = carShade(carColorRGB(car.color), 0.6);
+    return [{pts:[tw(-2.5,-10),tw(2.5,-10),tw(2.5,10),tw(-2.5,10)], color: col}];
+  }
   let body;
   if(car.type === 'motorbike') body = buildMotorbikeQuads(car);
   else if(car.type === 'ebike') body = buildEbikeQuads(car);
@@ -7597,6 +7671,8 @@ function frame(t){
   update(dt);
   updateBrakeLevels(dt);
   updateSkids(dt);
+  knockBikes();
+  updateFallenBikes(dt);
   updateWreck(dt);
   updateEffects(dt);
   updateChatter(dt);
