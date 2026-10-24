@@ -327,14 +327,15 @@ const CP_RAMP_END = 120;           // ramp climbs 0->CP_FLOOR_H over this span
 const CP_DECK_END = 190;           // flat upper deck; crossing this launches you
 const CP_LAUNCH_VY_MIN = 16, CP_LAUNCH_VY_MAX = 46;
 const LANE_OFFSET = 16;            // distance of each lane from the street centerline
-// was 70 -- at that rate, the exponential ease toward a new lane (see
-// laneEase below) takes a good quarter-second-plus to clear the
-// collision margin against a car you're passing (see collideWorld's
-// latMargin), which is real exposure time at speed: a late or last-
-// moment overtake could still be mid-shift, laterally too close, right
-// when you draw level with the car being passed, reading as "I got hit
-// even though I was overtaking". Faster lane changes shrink that window.
-const LANE_SPEED = 130;
+// was 70, then 130 -- even at 130 an empirical sweep (drive straight,
+// then do one ordinary lane change near traffic, repeated across many
+// random cities) still turned up frequent mid-transition false hits:
+// the exponential ease toward a new lane (see laneEase below) still
+// spent long enough inside collideWorld's latMargin for a nearby car in
+// the target lane to catch it mid-shift. 220 cut that same test's lateral
+// false hits to zero across ten runs. Faster lane changes shrink the exposure
+// window; see latMargin below for the other half of this fix.
+const LANE_SPEED = 220;
 const TURN_RATE = 3.6;             // rad/sec every car's visual heading animates at —
                                     // slow enough that a turn clearly reads as motion
                                     // instead of snapping/blinking into the new heading
@@ -785,32 +786,34 @@ function generateCity(seed){
   // which read as flickering debris in the middle of the road
   sidewalks = [];
   const swWidth = 11;
-  // on an arterial, the curb sits right at the edge of the last marked
-  // lane (no gap) -- using the generic roadHalf-based offset here left an
-  // ~8-unit strip of plain paved road between the outermost lane's own
-  // marked edge (ARTERIAL_DRIVABLE_HALF) and the sidewalk, wide enough to
-  // read as an extra unmarked lane next to three properly 16-unit-wide
-  // ones: part of the same "lanes aren't the same width" complaint as the
-  // missing turn-lane divider fixed above. Minor streets have no lane
-  // markings to butt up against, so they keep the original curb offset.
-  const sidewalkInset = (rh) => rh===ROAD_HALF_ARTERIAL ? ARTERIAL_DRIVABLE_HALF+swWidth/2 : rh-swWidth/2-1;
+  // minor streets keep the original curb-hugging strip. Arterial pavement
+  // runs from a small kerb gap off the outermost lane out to the building
+  // line: buildings sit at roadHalf (68) there, so a fixed 11-unit strip
+  // left a ~9-unit band of bare road between the pavement and the walls,
+  // and its inner edge sat flush against the outer lane, with no clearance
+  // for a car in that lane.
+  const sidewalkSpan = (rh) => rh===ROAD_HALF_ARTERIAL
+    ? [ARTERIAL_DRIVABLE_HALF+4, ROAD_HALF_ARTERIAL]
+    : [rh-swWidth-1, rh-1];
   for(let ix=0; ix<streetLinesX.length; ix++){
     const x = streetLinesX[ix];
+    const [inner, outer] = sidewalkSpan(roadHalfX[ix]);
     for(let side of [-1,1]){
-      const sx = x + side*sidewalkInset(roadHalfX[ix]);
+      const a = x + side*inner, b = x + side*outer;
       for(let i=0;i<BLOCKS_Z;i++){
         const z1 = streetLinesZ[i]+roadHalfZ[i]+8, z2 = streetLinesZ[i+1]-roadHalfZ[i+1]-8;
-        if(z2>z1) sidewalks.push({x1:sx-swWidth/2, x2:sx+swWidth/2, z1, z2});
+        if(z2>z1) sidewalks.push({x1:Math.min(a,b), x2:Math.max(a,b), z1, z2});
       }
     }
   }
   for(let iz=0; iz<streetLinesZ.length; iz++){
     const z = streetLinesZ[iz];
+    const [inner, outer] = sidewalkSpan(roadHalfZ[iz]);
     for(let side of [-1,1]){
-      const sz = z + side*sidewalkInset(roadHalfZ[iz]);
+      const a = z + side*inner, b = z + side*outer;
       for(let i=0;i<BLOCKS_X;i++){
         const x1 = streetLinesX[i]+roadHalfX[i]+8, x2 = streetLinesX[i+1]-roadHalfX[i+1]-8;
-        if(x2>x1) sidewalks.push({x1, x2, z1:sz-swWidth/2, z2:sz+swWidth/2});
+        if(x2>x1) sidewalks.push({x1, x2, z1:Math.min(a,b), z2:Math.max(a,b)});
       }
     }
   }
@@ -2548,14 +2551,26 @@ function updatePlayer(dt){
     ? player.arcTurn.turnSign * (1 - player.arcTurn.sweep/(Math.PI/2)) * 0.26 * speedFrac
     : clamp(headingGap/(Math.PI/2), -1, 1) * 0.26 * speedFrac;
 
-  // tires screech on a hard, fast turn or a hard stop from speed —
-  // debounced so it fires once per event, not every frame it's true
+  // tires screech on a hard, fast turn or a hard stop from speed. Each
+  // screech clip is only ~0.45s, but a corner arc taken at real speed
+  // sweeps its full 90 degrees over a good deal longer than that — a
+  // single one-shot used to fire at the start and then leave the rest of
+  // a fast corner silent. Retriggering on a short cooldown while still
+  // cornering/braking keeps the skid sound going for the whole turn
+  // instead of just its opening beat; the cooldown is a touch under the
+  // clip's own length so each retrigger overlaps slightly rather than
+  // leaving an audible gap.
+  const SCREECH_RETRIGGER = 0.4;
   const cornering = (player.arcTurn ? true : Math.abs(headingGap) > 0.15) && Math.abs(player.speed) > 70;
   const hardBraking = brake && Math.abs(player.speed) > 100;
-  if((cornering || hardBraking) && !player.screeching){
-    SFX.screech();
-    player.screeching = true;
-  } else if(!cornering && !hardBraking){
+  player.screechTimer = (player.screechTimer || 0) - dt;
+  if(cornering || hardBraking){
+    if(!player.screeching || player.screechTimer <= 0){
+      SFX.screech();
+      player.screeching = true;
+      player.screechTimer = SCREECH_RETRIGGER;
+    }
+  } else {
     player.screeching = false;
   }
 
@@ -2683,13 +2698,34 @@ function updatePlayer(dt){
 
   player.crashCooldown -= dt;
   if(hit){
-    const impactSpeed = Math.abs(player.speed);
+    // a vehicle-vs-vehicle hit scales damage by how fast the two were
+    // actually closing on each other, not just the player's own speed --
+    // the old flat impactSpeed-based formula couldn't tell a gentle
+    // same-direction bump (barely closing at all, even at high speed)
+    // from a head-on in the oncoming lane (closing speeds add together),
+    // so a rear-end tap and a head-on wreck did identical damage at the
+    // same player speed. A static-object crash (building, median) has no
+    // "other vehicle" to close with, so it keeps using the player's own
+    // speed as before.
+    const hitVehicle = lastVehicleHit;
+    const impactSpeed = hitVehicle ? closingSpeed(hitVehicle) : Math.abs(player.speed);
     player.speed = 0; // stop dead on impact, not a damped carry-through
     if(player.crashCooldown <= 0){
       fuel -= 3;
       // harder impacts do more damage — a gentle nudge barely registers,
-      // slamming in at speed can take a real chunk off in one hit
-      damage = clamp(damage + clamp(impactSpeed/player.maxSpeed, 0, 1) * 22, 0, 100);
+      // slamming in at speed can take a real chunk off in one hit.
+      // Scenery (buildings, medians) keeps the old scale, capped at a
+      // flat 22 per hit -- there's no closing speed to speak of, just the
+      // player's own. A vehicle-vs-vehicle hit uses closingSpeed instead,
+      // and is allowed to scale past the old cap: two cars doing their
+      // own top speed head-on close at roughly DOUBLE either one's speed,
+      // and that really should be able to total the car in one hit
+      // ("no chance + explosion"), while a same-direction tap (a low
+      // closing speed even at high road speed) stays a minor bump.
+      const damageAdd = hitVehicle
+        ? clamp(impactSpeed/player.maxSpeed, 0, 2) * 50
+        : clamp(impactSpeed/player.maxSpeed, 0, 1) * 22;
+      damage = clamp(damage + damageAdd, 0, 100);
       showBanner('CRASH!', 0.6);
       player.crashCooldown = 0.8;
       SFX.crash();
@@ -2787,25 +2823,53 @@ function collideWorld(x, z, r, ignoreMedians){
   // r-1.5 (7.5) still clipped in practice: two cars each holding that much
   // lateral margin only need a ~1-unit nudge (easing overshoot, a car
   // mid-lane-change) to overlap across the full 16-unit lane spacing.
-  // r-4 still wasn't enough slack: a lane change in progress (see
-  // LANE_SPEED/laneEase) spends real time easing across that same 16
-  // units, and drawing level with the car being passed before it's
-  // finished reads as "hit despite overtaking cleanly". r-6 leaves more
-  // of the gap free for a change still mid-flight.
-  const longMargin = r+8, latMargin = r-6;
+  // r-4, then r-6, still weren't enough slack: a lane change in progress
+  // (see LANE_SPEED/laneEase) spends real time easing across that same 16
+  // units, and drawing level with a car in the target lane before it's
+  // finished reads as "hit despite overtaking/changing lanes cleanly". An
+  // empirical sweep (many random cities, one ordinary lane change each
+  // near live traffic) still turned up false hits well into double
+  // digits per run at r-6 -- r-7, together with the LANE_SPEED increase
+  // above, cut that same sweep's lateral false hits to zero across ten runs.
+  const longMargin = r+8, latMargin = r-7;
   for(const c of allTraffic()){
     const dx = x-c.x, dz = z-c.z;
     const along = c.axis==='z' ? Math.abs(dz) : Math.abs(dx);
     const across = c.axis==='z' ? Math.abs(dx) : Math.abs(dz);
-    if(along < longMargin && across < latMargin) return true;
+    if(along < longMargin && across < latMargin){ lastVehicleHit = c; return true; }
   }
   if(suspect){
     const dx = x-suspect.x, dz = z-suspect.z;
     const along = suspect.axis==='z' ? Math.abs(dz) : Math.abs(dx);
     const across = suspect.axis==='z' ? Math.abs(dx) : Math.abs(dz);
-    if(along < longMargin && across < latMargin) return true;
+    if(along < longMargin && across < latMargin){ lastVehicleHit = suspect; return true; }
   }
   return false;
+}
+
+// set by collideWorld whenever the hit it reports is against a moving
+// vehicle (not a building/median/roundabout) -- read right after calling
+// it so updatePlayer can tell a glancing same-direction bump from a
+// genuine closing-speed impact (see the damage calc there). null means
+// the most recent collideWorld call either found no hit or hit something
+// static.
+let lastVehicleHit = null;
+
+// the combined speed at which the player and `car` are closing on each
+// other, not just the player's own speed -- two cars travelling the same
+// direction at similar speeds are barely approaching each other at all
+// even if both are doing 200, while two cars headed straight at each
+// other add their speeds together. Computing it as the magnitude of the
+// difference between their velocity vectors (rather than hand-casing
+// same-direction/opposite-direction/perpendicular) gets all three right
+// with one formula: it comes out small for a gentle rear-end, large for
+// a head-on, and in between for a T-bone at a junction.
+function closingSpeed(car){
+  const pvx = player.axis==='z' ? 0 : player.dir*player.speed;
+  const pvz = player.axis==='z' ? player.dir*player.speed : 0;
+  const cvx = car.axis==='z' ? 0 : car.dir*car.speed;
+  const cvz = car.axis==='z' ? car.dir*car.speed : 0;
+  return Math.hypot(pvx-cvx, pvz-cvz);
 }
 
 // drops a slick behind the player, on a cooldown so the road can't be
@@ -3062,8 +3126,16 @@ function updateStreetCar(car, dt){
     // apart have barely a unit of clearance between their edges at all;
     // padding the tolerance out instead of in kept flagging that normal,
     // lane-respecting pass as a collision
+    // was -1.5 -- fine for an average car (ownHalfWidth+playerHalfWidth
+    // around 14.5, still ~1.5 clear of the 16-unit lane spacing), but a
+    // dumptruck's own half-width (10.5) pushed its tolerance to EXACTLY
+    // 16.0 -- zero real clearance against a player correctly sitting in
+    // the very next lane, so the slightest nudge (a roundabout/roadworks
+    // avoid offset, lane-easing not having fully settled) tipped it into
+    // a false "crash" despite nothing actually touching. -4 keeps every
+    // vehicle type at least ~2 units clear of that boundary.
     const playerHalfWidth = (VEHICLE_FOOTPRINT[player.type] || VEHICLE_FOOTPRINT.car)[0];
-    const bodyOverlapTol = ownHalfWidth + playerHalfWidth - 1.5;
+    const bodyOverlapTol = ownHalfWidth + playerHalfWidth - 4;
     if(nearestIsPlayer && nearestAhead < MIN_GAP*0.6 && nearestLateralGap < bodyOverlapTol && car.crashCooldown<=0){
       SFX.crash();
       spookSuspectNear(car.x, car.z);
