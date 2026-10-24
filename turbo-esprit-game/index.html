@@ -164,7 +164,7 @@
       <div id="damageBar"><div id="damageBarFill"></div></div>
       <div class="row"><span class="label">SUSPICION</span><span id="hudSuspicion">0%</span></div>
       <div id="suspicionBar"><div id="suspicionBarFill"></div></div>
-      <div class="row"><span class="label">SOUND (M)</span><span id="hudSound" class="clickable">ON</span></div>
+      <div class="row"><span class="label">SOUND (M)</span><span><span id="hudSound" class="clickable">ON</span> <span id="hudSoundReset" class="clickable">RESET</span></span></div>
     </div>
   </div>
 
@@ -1545,6 +1545,8 @@ function pruneNearPlayer(){
 
 function resetGame(){
   document.getElementById('overlay').classList.add('hidden');
+  // a new round never inherits a siren or speech left going by the last one
+  SFX.hardReset();
   wreckFx = null;
   playerWrecked = false;
   skidMarks = [];
@@ -2111,6 +2113,77 @@ const Engine = (function(){
 const SFX = (function(){
   function ctx(){ return Engine.getContext(); }
 
+  // every one-shot and the siren feed one shared bus, so mute and the reset
+  // button can silence them all at once. They used to connect straight to
+  // the speakers, so muting never touched a siren that was already running
+  let sfxOutNode = null;
+  function sfxBus(ac){
+    if(!sfxOutNode){
+      sfxOutNode = ac.createGain();
+      sfxOutNode.gain.value = Engine.isMuted ? 0 : 1;
+      sfxOutNode.connect(ac.destination);
+    }
+    return sfxOutNode;
+  }
+  function setMuted(m){
+    const ac = ctx();
+    if(sfxOutNode && ac) sfxOutNode.gain.setTargetAtTime(m ? 0 : 1, ac.currentTime, 0.06);
+  }
+  // hard stop: cut the siren dead, drop everything queued on the old bus and
+  // clear any speech still waiting in the browser's queue
+  function hardReset(){
+    if(sirenOsc){ try{ sirenOsc.stop(); }catch(e){} }
+    if(sirenLfo){ try{ sirenLfo.stop(); }catch(e){} }
+    sirenOsc = null; sirenLfo = null; sirenGain = null; sirenActive = false;
+    if(cbHiss){ try{ cbHiss.src.stop(); }catch(e){} cbHiss = null; }
+    if(sfxOutNode){ try{ sfxOutNode.disconnect(); }catch(e){} sfxOutNode = null; }
+    if(window.speechSynthesis) window.speechSynthesis.cancel();
+  }
+
+  // CB radio texture for the dispatch voice: two call-in blips before a
+  // line, a squelch click as the channel opens and closes, and a band of
+  // hiss under the voice while it talks. The hiss is one looping noise
+  // source behind a bandpass, faded in and out rather than started per line
+  let cbHiss = null;
+  function cbCallIn(){
+    const ac = ctx();
+    if(!ac || Engine.isMuted) return;
+    const now = ac.currentTime;
+    for(const [f, dt] of [[1250, 0], [1650, 0.14]]){
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.type = 'square'; o.frequency.value = f;
+      g.gain.setValueAtTime(0, now+dt);
+      g.gain.linearRampToValueAtTime(0.05, now+dt+0.005);
+      g.gain.linearRampToValueAtTime(0, now+dt+0.11);
+      o.connect(g); g.connect(sfxBus(ac));
+      o.start(now+dt); o.stop(now+dt+0.12);
+    }
+  }
+  function cbSquelch(open){
+    const ac = ctx();
+    if(!ac || Engine.isMuted) return;
+    const now = ac.currentTime;
+    const len = Math.floor(ac.sampleRate*0.04);
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for(let i=0;i<len;i++) d[i] = (Math.random()*2-1)*Math.exp(-i/(len*0.15));
+    const click = ac.createBufferSource(), cg = ac.createGain();
+    click.buffer = buf; cg.gain.value = open ? 0.18 : 0.22;
+    click.connect(cg); cg.connect(sfxBus(ac)); click.start(now);
+    if(open && !cbHiss){
+      const nLen = ac.sampleRate, nBuf = ac.createBuffer(1, nLen, ac.sampleRate);
+      const nd = nBuf.getChannelData(0);
+      for(let i=0;i<nLen;i++) nd[i] = Math.random()*2-1;
+      const src = ac.createBufferSource(); src.buffer = nBuf; src.loop = true;
+      const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2200; bp.Q.value = 0.6;
+      const hg = ac.createGain(); hg.gain.value = 0;
+      src.connect(bp); bp.connect(hg); hg.connect(sfxBus(ac));
+      src.start(now);
+      cbHiss = {src, gain: hg};
+    }
+    if(cbHiss) cbHiss.gain.gain.setTargetAtTime(open ? 0.035 : 0, now, open ? 0.05 : 0.08);
+  }
+
   // a real impact now that you stop dead on one — bigger, with a sub-bass
   // thump underneath the mid-range thud and a sharp crack layered on top
   // of the crunch noise, not just a soft bump
@@ -2122,7 +2195,7 @@ const SFX = (function(){
     g.gain.setValueAtTime(0.0001, now);
     g.gain.linearRampToValueAtTime(0.55, now+0.01);
     g.gain.exponentialRampToValueAtTime(0.001, now+0.4);
-    g.connect(ac.destination);
+    g.connect(sfxBus(ac));
 
     const thud = ac.createOscillator(); thud.type = 'triangle';
     thud.frequency.setValueAtTime(160, now);
@@ -2154,7 +2227,7 @@ const SFX = (function(){
     const crack = ac.createBufferSource(); crack.buffer = cbuf;
     const cf = ac.createBiquadFilter(); cf.type = 'highpass'; cf.frequency.value = 1800;
     const cg = ac.createGain(); cg.gain.setValueAtTime(0.5, now);
-    crack.connect(cf); cf.connect(cg); cg.connect(ac.destination);
+    crack.connect(cf); cf.connect(cg); cg.connect(sfxBus(ac));
     crack.start(now);
   }
 
@@ -2171,7 +2244,7 @@ const SFX = (function(){
       g.gain.setValueAtTime(0.0001, t0);
       g.gain.linearRampToValueAtTime(0.16, t0+0.015);
       g.gain.exponentialRampToValueAtTime(0.0008, t0+0.22);
-      o.connect(g); g.connect(ac.destination);
+      o.connect(g); g.connect(sfxBus(ac));
       o.start(t0); o.stop(t0+0.24);
     });
   }
@@ -2183,7 +2256,7 @@ const SFX = (function(){
     const g = ac.createGain();
     g.gain.setValueAtTime(0.28, now);
     g.gain.exponentialRampToValueAtTime(0.001, now+0.11);
-    g.connect(ac.destination);
+    g.connect(sfxBus(ac));
 
     const len = Math.floor(ac.sampleRate*0.12);
     const buf = ac.createBuffer(1, len, ac.sampleRate);
@@ -2200,7 +2273,7 @@ const SFX = (function(){
     const cg = ac.createGain();
     cg.gain.setValueAtTime(0.18, now);
     cg.gain.exponentialRampToValueAtTime(0.001, now+0.06);
-    crack.connect(cg); cg.connect(ac.destination);
+    crack.connect(cg); cg.connect(sfxBus(ac));
     crack.start(now); crack.stop(now+0.07);
   }
 
@@ -2216,7 +2289,7 @@ const SFX = (function(){
     g.gain.linearRampToValueAtTime(0.2, now+0.02);
     g.gain.setValueAtTime(0.2, now+0.26);
     g.gain.exponentialRampToValueAtTime(0.001, now+0.42);
-    g.connect(ac.destination);
+    g.connect(sfxBus(ac));
     for(const f of [370*p, 440*p]){
       const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
       const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1400;
@@ -2247,7 +2320,7 @@ const SFX = (function(){
     g.gain.linearRampToValueAtTime(0.14, now+0.03);
     g.gain.exponentialRampToValueAtTime(0.001, now+0.45);
 
-    noise.connect(bp); bp.connect(g); g.connect(ac.destination);
+    noise.connect(bp); bp.connect(g); g.connect(sfxBus(ac));
     noise.start(now);
   }
 
@@ -2269,7 +2342,7 @@ const SFX = (function(){
     sirenLfo = ac.createOscillator(); sirenLfo.type = 'sine'; sirenLfo.frequency.value = 0.7;
     const lfoGain = ac.createGain(); lfoGain.gain.value = 180;
     sirenLfo.connect(lfoGain); lfoGain.connect(sirenOsc.frequency);
-    sirenOsc.connect(sirenGain); sirenGain.connect(ac.destination);
+    sirenOsc.connect(sirenGain); sirenGain.connect(sfxBus(ac));
     sirenOsc.start(now); sirenLfo.start(now);
   }
   function sirenStop(){
@@ -2300,7 +2373,7 @@ const SFX = (function(){
     const crack = ac.createBufferSource(); crack.buffer = cbuf;
     const cf = ac.createBiquadFilter(); cf.type = 'highpass'; cf.frequency.value = 1200;
     const cg = ac.createGain(); cg.gain.setValueAtTime(vol*0.8, now);
-    crack.connect(cf); cf.connect(cg); cg.connect(ac.destination);
+    crack.connect(cf); cf.connect(cg); cg.connect(sfxBus(ac));
     crack.start(now);
 
     const rumbleStart = now + (far ? 0.25 : 0.08);
@@ -2309,7 +2382,7 @@ const SFX = (function(){
     rg.gain.setValueAtTime(0.0001, rumbleStart);
     rg.gain.linearRampToValueAtTime(vol, rumbleStart+0.25);
     rg.gain.exponentialRampToValueAtTime(0.001, rumbleStart+rumbleDur);
-    rg.connect(ac.destination);
+    rg.connect(sfxBus(ac));
     for(const detune of [1, 1.035]){
       const o = ac.createOscillator(); o.type = 'sawtooth';
       const baseHz = (30 + Math.random()*14) * detune;
@@ -2334,7 +2407,7 @@ const SFX = (function(){
     src.buffer = buf;
     const g = ac.createGain();
     g.gain.setValueAtTime(0.7, now);
-    src.connect(g); g.connect(ac.destination);
+    src.connect(g); g.connect(sfxBus(ac));
     src.start(now);
   }
   function explosion(){
@@ -2359,9 +2432,9 @@ const SFX = (function(){
     const src = ac.createBufferSource(); src.buffer = buf;
     const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 380;
     const g = ac.createGain(); g.gain.setValueAtTime(vol || 0.06, now);
-    src.connect(lp); lp.connect(g); g.connect(ac.destination); src.start(now);
+    src.connect(lp); lp.connect(g); g.connect(sfxBus(ac)); src.start(now);
   }
-  return { crash, bump, bust, gunshot, horn, screech, sirenStart, sirenStop, thunder, explosion };
+  return { crash, bump, bust, gunshot, horn, screech, sirenStart, sirenStop, thunder, explosion, setMuted, hardReset, cbCallIn, cbSquelch };
 })();
 
 // Juhani Junkala's "5 Action Chiptunes" (CC0, opengameart.org/content/5-chiptunes-action),
@@ -2570,9 +2643,22 @@ function cycleMusic(){
 function toggleMute(){
   Engine.setMuted(!Engine.isMuted);
   Music.setMuted(Engine.isMuted);
+  SFX.setMuted(Engine.isMuted);
   document.getElementById('hudSound').textContent = Engine.isMuted ? 'OFF' : 'ON';
 }
 document.getElementById('hudSound').addEventListener('click', toggleMute);
+
+// the RESET button beside the sound readout: stops anything stuck on (the
+// siren, queued speech, a one-shot ringing on), then re-applies the mute
+// state so the buses come back in step with the readout
+function resetSound(){
+  SFX.hardReset();
+  Engine.setMuted(Engine.isMuted);
+  Music.setMuted(Engine.isMuted);
+  SFX.setMuted(Engine.isMuted);
+  showBanner('SOUND RESET', 1.0);
+}
+document.getElementById('hudSoundReset').addEventListener('click', resetSound);
 
 // ---------------------------------------------------------------
 // Physics / AI update
@@ -4019,6 +4105,11 @@ function speakChatter(text){
     if(Engine.isMuted || !window.speechSynthesis) return;
     const u = new SpeechSynthesisUtterance(text);
     u.rate = 1.05; u.pitch = 0.7; u.volume = 0.55;
+    // the channel opens when the voice starts and closes when it stops
+    u.onstart = () => SFX.cbSquelch(true);
+    u.onend = () => SFX.cbSquelch(false);
+    u.onerror = () => SFX.cbSquelch(false);
+    SFX.cbCallIn();
     window.speechSynthesis.speak(u);
   } catch(e){ /* speech synthesis is a nice-to-have, never worth erroring over */ }
 }
