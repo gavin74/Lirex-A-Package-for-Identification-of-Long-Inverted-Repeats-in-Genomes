@@ -5982,24 +5982,63 @@ function dogPositions(){
 
 // a very small stick figure: two legs (alternating with the walk cycle),
 // a torso and a head — just enough to read as "a person", not a character model
-function buildPedestrianQuads(p){
+// a solid box in a figure's own frame (lx = across, ly = up, lz = forward),
+// emitting only the faces that look at the camera so the painter's sort
+// sees a body's outside and nothing hidden behind it
+function figureBox(tw, rot, cam, x0, x1, y0, y1, z0, z1, base){
+  const out = [];
+  const wn = (nx, ny, nz) => [nx*rot.c + nz*rot.s, ny, -nx*rot.s + nz*rot.c];
+  const faces = [
+    {n:[1,0,0],  k:0.8,  pts:[[x1,y0,z0],[x1,y1,z0],[x1,y1,z1],[x1,y0,z1]]},
+    {n:[-1,0,0], k:0.8,  pts:[[x0,y0,z1],[x0,y1,z1],[x0,y1,z0],[x0,y0,z0]]},
+    {n:[0,1,0],  k:1.1,  pts:[[x0,y1,z0],[x1,y1,z0],[x1,y1,z1],[x0,y1,z1]]},
+    {n:[0,0,1],  k:1.0,  pts:[[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]]},
+    {n:[0,0,-1], k:0.9,  pts:[[x1,y0,z0],[x0,y0,z0],[x0,y1,z0],[x1,y1,z0]]},
+  ];
+  for(const f of faces){
+    const w = f.pts.map(([lx,ly,lz]) => tw(lx,ly,lz));
+    const mid = [0,1,2].map(i => (w[0][i]+w[2][i])/2);
+    const n = wn(...f.n);
+    const toCam = [cam.x-mid[0], cam.y-mid[1], cam.z-mid[2]];
+    if(n[0]*toCam[0] + n[1]*toCam[1] + n[2]*toCam[2] <= 0) continue;
+    out.push({pts:w, color: shadeColor(base, f.k)});
+  }
+  return out;
+}
+function colorParts(str){
+  const m = /rgb\((\d+),(\d+),(\d+)\)/.exec(str);
+  return m ? [+m[1], +m[2], +m[3]] : [128,128,128];
+}
+function buildPedestrianQuads(p, cam){
   const s = Math.sin(p.facing), c = Math.cos(p.facing);
-  function tw(lx, ly, lz){ return [p.x + (lx*c + lz*s), ly, p.z + (-lx*s + lz*c)]; }
+  const rot = {s, c};
+  const tw = (lx, ly, lz) => [p.x + (lx*c + lz*s), ly, p.z + (-lx*s + lz*c)];
   const stride = Math.sin(p.walk*Math.PI*8) * 1.6;
+  const cloth = colorParts(p.color), skin = [205,175,148];
   const quads = [];
-  quads.push({pts:[tw(0,0,-stride),tw(0.6,6,0),tw(0.6,6,0),tw(0,0,-stride)], color:'rgb(25,26,28)'});
-  quads.push({pts:[tw(0,0,stride),tw(-0.6,6,0),tw(-0.6,6,0),tw(0,0,stride)], color:'rgb(25,26,28)'});
-  quads.push({pts:[tw(-1.6,6,0),tw(1.6,6,0),tw(1.6,11,0),tw(-1.6,11,0)], color:p.color});
-  quads.push({pts:[tw(-1.2,11,0),tw(1.2,11,0),tw(1.2,13,0),tw(-1.2,13,0)], color:'rgb(205,175,148)'});
+  // legs swing fore and aft in opposite phase
+  quads.push(...figureBox(tw, rot, cam, -1.5, -0.2, 0, 6, stride-0.7, stride+0.7, cloth));
+  quads.push(...figureBox(tw, rot, cam,  0.2,  1.5, 0, 6, -stride-0.7, -stride+0.7, cloth));
+  quads.push(...figureBox(tw, rot, cam, -1.7, 1.7, 6, 12.5, -0.9, 0.9, cloth));
+  // arms swing against the legs
+  quads.push(...figureBox(tw, rot, cam, -2.3, -1.7, 6.5, 11.5, -stride*0.7-0.5, -stride*0.7+0.5, cloth.map(v => v*0.85)));
+  quads.push(...figureBox(tw, rot, cam,  1.7,  2.3, 6.5, 11.5,  stride*0.7-0.5,  stride*0.7+0.5, cloth.map(v => v*0.85)));
+  quads.push(...figureBox(tw, rot, cam, -1.2, 1.2, 12.5, 15.2, -1.1, 1.1, skin));
   return quads;
 }
-function buildDogQuads(d){
+function buildDogQuads(d, cam){
   const s = Math.sin(d.facing), c = Math.cos(d.facing);
-  function tw(lx, ly, lz){ return [d.x + (lx*c + lz*s), ly, d.z + (-lx*s + lz*c)]; }
+  const rot = {s, c};
+  const tw = (lx, ly, lz) => [d.x + (lx*c + lz*s), ly, d.z + (-lx*s + lz*c)];
+  const fur = [140,108,74], dark = [92,70,48];
   const quads = [];
-  const fur = 'rgb(140,108,74)';
-  quads.push({pts:[tw(0,0,-3.5),tw(0.5,3,-3.5),tw(0.5,3,2.5),tw(0,0,2.5)], color:fur});
-  quads.push({pts:[tw(1.2,2.5,2),tw(1.8,2.5,3.6),tw(1.8,4,3.6),tw(1.2,4,2)], color:fur});
+  quads.push(...figureBox(tw, rot, cam, -1.3, 1.3, 2.2, 4.6, -3.8, 2.8, fur));
+  quads.push(...figureBox(tw, rot, cam, -1.1, 1.1, 3.6, 5.8, 2.8, 5.2, fur));
+  quads.push(...figureBox(tw, rot, cam, -0.3, 0.3, 4.0, 5.2, -4.6, -3.8, dark));
+  for(const lz of [-2.8, 1.8]){
+    quads.push(...figureBox(tw, rot, cam, -1.0, -0.4, 0, 2.4, lz-0.6, lz+0.6, dark));
+    quads.push(...figureBox(tw, rot, cam,  0.4,  1.0, 0, 2.4, lz-0.6, lz+0.6, dark));
+  }
   return quads;
 }
 
@@ -6597,14 +6636,14 @@ function drawScene(){
   for(const p of pedestrianPositions()){
     const d = dist2(cam.x,cam.z,p.x,p.z);
     if(d > nearDistSq) continue;
-    for(const f of buildPedestrianQuads(p)){
+    for(const f of buildPedestrianQuads(p, cam)){
       allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
     }
   }
   for(const dg of dogPositions()){
     const d = dist2(cam.x,cam.z,dg.x,dg.z);
     if(d > nearDistSq) continue;
-    for(const f of buildDogQuads(dg)){
+    for(const f of buildDogQuads(dg, cam)){
       allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
     }
   }
