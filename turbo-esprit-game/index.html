@@ -1318,6 +1318,8 @@ let impactFlash = 0;  // 0..1 red edge flash when the player takes a crash
 let pedDown = {};     // walker id -> worldTime when they're back on their feet
 let splats = [];      // {x,z,t} blood on the road where a walker was hit
 let walkersThisFrame = [];
+let skidMarks = [];   // ground tyre marks, kept for the round
+let tyreSmoke = [];   // {x,y,z,t} grey puffs from skidding tyres
 let bloodOn = false; // blood on the road where walkers are hit -- off by default
 function toggleBlood(){
   bloodOn = !bloodOn;
@@ -1366,7 +1368,46 @@ function updateRespawns(){
     list.push(nc);
   }
 }
+// deceleration as a 0..1 brake level, eased so the lights don't flicker
+function updateBrakeLevels(dt){
+  for(const car of [player, ...allTraffic()]){
+    const prev = car.lastSpd === undefined ? car.speed : car.lastSpd;
+    const decel = Math.max(0, (prev - car.speed) / Math.max(dt, 1e-3));
+    const target = clamp(decel/120, 0, 1);
+    car.brakeLevel = (car.brakeLevel || 0) + (target - (car.brakeLevel || 0)) * Math.min(1, dt*12);
+    car.lastSpd = car.speed;
+  }
+}
+// the two rear tyres of a car, in world space
+function rearWheels(car){
+  const d = VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car;
+  const s = Math.sin(car.heading), co = Math.cos(car.heading);
+  const lz = d[2] + 1.5, hw = d[0]*0.75;
+  return [-hw, hw].map(lx => ({x: car.x + lx*co + lz*s, z: car.z - lx*s + lz*co}));
+}
+function updateSkids(dt){
+  for(const car of [player, ...allTraffic()]){
+    if(car===player && playerWrecked) continue;
+    if(dist2(car.x, car.z, player.x, player.z) > 600*600){ car.skidPrev = null; continue; }
+    const speedAbs = Math.abs(car.speed);
+    const skidding = car===player ? !!player.screeching
+      : ((car.arcTurn && speedAbs > 70) || (car.brakeLevel > 0.8 && speedAbs > 90));
+    if(!skidding){ car.skidPrev = null; continue; }
+    const wheels = rearWheels(car);
+    if(car.skidPrev){
+      for(let i=0;i<2;i++){
+        const a = car.skidPrev[i], b = wheels[i];
+        if(Math.hypot(b.x-a.x, b.z-a.z) > 0.2) skidMarks.push({x1:a.x, z1:a.z, x2:b.x, z2:b.z});
+      }
+    }
+    car.skidPrev = wheels;
+    for(const w of wheels) if(Math.random() < dt*14) tyreSmoke.push({x: w.x, y: 1.2, z: w.z, t: 0});
+  }
+  if(skidMarks.length > 4000) skidMarks.splice(0, skidMarks.length - 4000);
+}
+
 function updateEffects(dt){
+  tyreSmoke = tyreSmoke.filter(p => { p.t += dt; return p.t < 1.2; });
   for(const b of blasts) b.t += dt;
   blasts = blasts.filter(b => b.t < 1.4);
   for(const p of damagePops) p.t += dt;
@@ -1445,6 +1486,8 @@ function resetGame(){
   document.getElementById('overlay').classList.add('hidden');
   wreckFx = null;
   playerWrecked = false;
+  skidMarks = [];
+  tyreSmoke = [];
   generateCity(Date.now() % 100000);
   player = spawnPlayerStart();
   score = 0; caught = 0; fuel = START_FUEL; damage = 0;
@@ -1846,7 +1889,7 @@ const Engine = (function(){
     mix.connect(preShaperGain);
 
     shaper = ac.createWaveShaper();
-    shaper.curve = softCurve(0.8);
+    shaper.curve = softCurve(1.5);
     preShaperGain.connect(shaper);
 
     filter = ac.createBiquadFilter();
@@ -1864,7 +1907,7 @@ const Engine = (function(){
     chugLfo = ac.createOscillator(); chugLfo.type = 'sine'; chugLfo.frequency.value = 9;
     chugShaper = ac.createWaveShaper();
     chugShaper.curve = chugCurve();
-    chugDepth = ac.createGain(); chugDepth.gain.value = 0.18;
+    chugDepth = ac.createGain(); chugDepth.gain.value = 0.3;
     chugLfo.connect(chugShaper);
     chugShaper.connect(chugDepth);
     chugDepth.connect(chugGain.gain);
@@ -1973,7 +2016,7 @@ const Engine = (function(){
     preShaperGain.gain.setTargetAtTime(0.8 + throttleBoost*0.7 + Math.min(spd/maxSpeed,1)*0.3, now, 0.08);
 
     noiseFilter.frequency.setTargetAtTime(500 + spd*3.2, now, 0.15);
-    noiseGain.gain.setTargetAtTime(Math.min(spd/maxSpeed,1)*0.03, now, 0.15);
+    noiseGain.gain.setTargetAtTime(Math.min(spd/maxSpeed,1)*0.06, now, 0.15);
 
     currentVol = 0.04 + Math.min(spd/maxSpeed, 1)*0.07 + throttleBoost*0.03;
     gainMaster.gain.setTargetAtTime(muted ? 0 : currentVol, now, 0.1);
@@ -5023,19 +5066,20 @@ function buildHeadlightGlow(car){
 // any time of day, not just at night, since that's a safety signal a
 // real driver relies on regardless of ambient light.
 function buildBrakeGlow(car){
-  const braking = !!car.braking;
+  const lvl = car.brakeLevel || 0;
   const nightAlpha = dayAmbient <= 0.5 ? clamp((0.5-dayAmbient)/0.35, 0, 1)*0.18 : 0;
-  const alpha = braking ? Math.max(nightAlpha, 0.5) : nightAlpha;
+  const alpha = Math.max(nightAlpha, lvl > 0.05 ? 0.25 + 0.75*lvl : 0);
   if(alpha < 0.03) return [];
   const d = VEHICLE_FOOTPRINT[car.type] || VEHICLE_FOOTPRINT.car;
   const hw = d[0], tail = d[2];
   const s = Math.sin(car.heading), c = Math.cos(car.heading);
   function tw(lx, lz){ return [car.x + (lx*c + lz*s), 3.0, car.z + (-lx*s + lz*c)]; }
-  const r = braking ? 2.6 : 1.3;
+  const r = 1.3 + 2.8*lvl;
   const quads = [];
   for(const side of [-1,1]){
     const p = tw(side*hw*0.58, tail+0.3);
     quads.push(...buildGlowQuads(p[0],p[1],p[2], r, [255,50,40], alpha));
+    if(lvl > 0.5) quads.push(...buildGlowQuads(p[0],p[1],p[2], r*0.4, [255,205,190], (lvl-0.5)*1.1));
   }
   return quads;
 }
@@ -6767,6 +6811,13 @@ function drawScene(){
     const q = projectFace([[s.x-4,0.05,s.z-4],[s.x+4,0.05,s.z-4],[s.x+4,0.05,s.z+4],[s.x-4,0.05,s.z+4]], cam);
     if(q) polyFill(q, `rgba(120,18,18,${(0.85*(1-s.t/25)).toFixed(3)})`, null);
   }
+  for(const m of skidMarks){
+    if(dist2(cam.x, cam.z, m.x1, m.z1) > 350*350) continue;
+    const dx = m.x2-m.x1, dz = m.z2-m.z1, len = Math.hypot(dx, dz) || 1;
+    const nx = -dz/len*0.8, nz = dx/len*0.8;
+    const q = projectFace([[m.x1+nx,0.07,m.z1+nz],[m.x2+nx,0.07,m.z2+nz],[m.x2-nx,0.07,m.z2-nz],[m.x1-nx,0.07,m.z1-nz]], cam);
+    if(q) polyFill(q, 'rgba(18,18,20,0.7)', null);
+  }
   // Collect every individual face (not grouped by object) and depth-sort
   // them all together. Grouping by object and sorting on one depth per
   // object — e.g. a building's centroid — is what caused roofs to paint
@@ -6930,6 +6981,13 @@ function drawScene(){
     if(d > RENDER_DIST*RENDER_DIST) continue;
     for(const f of buildMedianQuads(m, cam)){
       allFaces.push({pts:f.pts, color:f.color, stroke:'rgba(15,15,17,0.6)', width:1, depth:faceDepth(f.pts, cam)});
+    }
+  }
+  for(const p of tyreSmoke){
+    if(dist2(cam.x, cam.z, p.x, p.z) > nearDistSq) continue;
+    const k = p.t/1.2;
+    for(const f of buildGlowQuads(p.x, p.y + p.t*3, p.z, 2.0 + k*3, [120,120,120], (1-k)*0.4)){
+      allFaces.push({pts:f.pts, color:f.color, stroke:null, width:1, depth:faceDepth(f.pts, cam)});
     }
   }
   for(const sw of sidewalks){
@@ -7185,8 +7243,16 @@ function drawWreck(cam){
 }
 
 // floating "-N%" numbers rising from where the damage landed, fading out
+// a point is hidden from the camera when a building or wall sits between them
+function hiddenFromCam(cam, x, z){
+  for(const b of buildings) if(segmentHitsBox(cam.x, cam.z, x, z, b.x1, b.x2, b.z1, b.z2)) return true;
+  for(const w of walls) if(segmentHitsBox(cam.x, cam.z, x, z, w.x1, w.x2, w.z1, w.z2)) return true;
+  return false;
+}
 function drawDamagePops(cam){
   for(const pop of damagePops){
+    if(dist2(cam.x, cam.z, pop.x, pop.z) > 260*260) continue;
+    if(hiddenFromCam(cam, pop.x, pop.z)) continue;
     const sc = toCamSpace(pop.x, pop.y + pop.t*18, pop.z, cam);
     if(sc.z <= NEAR) continue;
     const sp = toScreen(sc);
@@ -7217,6 +7283,7 @@ function drawCarCracks(cam){
     const dmg = car===player ? damage : (car.damage || 0);
     if(dmg < 15) continue;
     if(dist2(cam.x, cam.z, car.x, car.z) > 300*300) continue;
+    if(car!==player && hiddenFromCam(cam, car.x, car.z)) continue;
     const s = Math.sin(car.heading), co = Math.cos(car.heading);
     const towardCam = (cam.x-car.x)*s + (cam.z-car.z)*co < 0 ? 'rear' : 'nose';
     const lz = towardCam === 'rear' ? -9.3 : 12.2;
@@ -7528,6 +7595,8 @@ function frame(t){
   updateLightning(dt);
   updateRain(dt);
   update(dt);
+  updateBrakeLevels(dt);
+  updateSkids(dt);
   updateWreck(dt);
   updateEffects(dt);
   updateChatter(dt);
