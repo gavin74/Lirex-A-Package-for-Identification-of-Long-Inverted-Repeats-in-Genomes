@@ -1330,6 +1330,8 @@ function startWreck(reason){
   gameState = 'over';
   playerWrecked = true;
   SFX.sirenStop();
+  SFX.endRound();
+  Music.setMuted(true);
   ClubAudio.update({jazz:0, rock:0, dance:0}, true);
   player.speed = 0;
   Engine.update(0, 1, false, false);
@@ -1547,6 +1549,7 @@ function resetGame(){
   document.getElementById('overlay').classList.add('hidden');
   // a new round never inherits a siren or speech left going by the last one
   SFX.hardReset();
+  Music.setMuted(Engine.isMuted);
   wreckFx = null;
   playerWrecked = false;
   skidMarks = [];
@@ -2140,6 +2143,15 @@ const SFX = (function(){
     if(window.speechSynthesis) window.speechSynthesis.cancel();
   }
 
+  // round over: stop any dispatch line still being spoken and let the CB
+  // hiss drop out, without touching the bus, so the wreck's own crash and
+  // explosion sounds still finish
+  function endRound(){
+    if(window.speechSynthesis) window.speechSynthesis.cancel();
+    const ac = ctx();
+    if(cbHiss && ac) cbHiss.gain.gain.setTargetAtTime(0, ac.currentTime, 0.05);
+  }
+
   // CB radio texture for the dispatch voice: two call-in blips before a
   // line, a squelch click as the channel opens and closes, and a band of
   // hiss under the voice while it talks. The hiss is one looping noise
@@ -2450,7 +2462,7 @@ const SFX = (function(){
     o.start(now); o.stop(now+dur+0.05);
   }
 
-  return { crash, bump, bust, gunshot, horn, screech, sirenStart, sirenStop, thunder, explosion, setMuted, hardReset, cbCallIn, cbSquelch, carAlarm };
+  return { crash, bump, bust, gunshot, horn, screech, sirenStart, sirenStop, thunder, explosion, setMuted, hardReset, endRound, cbCallIn, cbSquelch, carAlarm };
 })();
 
 // Juhani Junkala's "5 Action Chiptunes" (CC0, opengameart.org/content/5-chiptunes-action),
@@ -4460,6 +4472,8 @@ function showEndPanel(reason){
   // driving keeps sounding unless it's silenced here: the siren, the club
   // loops and the engine
   SFX.sirenStop();
+  SFX.endRound();
+  Music.setMuted(true);
   wantedTimer = 0;
   ClubAudio.update({jazz:0, rock:0, dance:0}, true);
   Engine.update(0, 1, false, false);
