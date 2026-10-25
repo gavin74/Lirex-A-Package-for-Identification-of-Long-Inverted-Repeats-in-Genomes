@@ -2832,7 +2832,21 @@ function queueTurn(side){
     setSignal(player, side, 2.5);
     return;
   }
+  // a second press of the same turn at the same junction is a U-turn: while
+  // the first is still waiting for the junction, or still in its first
+  // quarter of the corner, it becomes a half-circle back the way you came
+  if(player.pendingTurn === side){
+    player.pendingUTurn = true;
+    setSignal(player, side, 2.5);
+    return;
+  }
+  if(player.arcTurn && player.arcTurn.side === side && !player.arcTurn.uturn && player.arcTurn.sweep < Math.PI/2){
+    extendToUTurn(player.arcTurn);
+    setSignal(player, side, 2.5);
+    return;
+  }
   player.pendingTurn = side;
+  player.pendingUTurn = false;
   setSignal(player, side, 2.5);
 }
 
@@ -2880,10 +2894,42 @@ function turnPlayer(side, timing){
   const laneMag = laneCount <= 1 ? 1 : 1 + Math.round(clamp(timing ?? 0, 0, 1) * (laneCount-1));
   const nextLane = correctLane(next.axis, next.dir, nextStreetCoord) * laneMag;
   player.arcTurn = {
+    side, uturn: false, target: Math.PI/2, radius: CORNER_RADIUS,
     turnSign: side==='right' ? 1 : -1, // heading increases turning right, decreases turning left (see cardinalHeading)
     sweep: 0, // radians swept so far; the arc is done at exactly PI/2
     nextAxis: next.axis, nextDir: next.dir, nextLane, nextStreetCoord
   };
+}
+
+// a U-turn is the same corner arc carried on through a half circle, ending
+// in the opposite lane heading back the way you came. Only on two-way
+// streets (a one-way street has no lane to come back into). The tighter
+// radius and capped speed keep the loop inside the road.
+const UTURN_RADIUS = 16, UTURN_MAX_SPEED = 60;
+function uTurnAllowed(){
+  return oneWayDir(player.axis, player.axis==='z' ? player.x : player.z) === null;
+}
+function setUTurnArc(at){
+  at.uturn = true;
+  at.target = Math.PI;
+  at.radius = UTURN_RADIUS;
+  at.nextAxis = player.axis;
+  at.nextDir = -player.dir;
+  at.nextStreetCoord = player.streetCoord;
+  at.nextLane = correctLane(player.axis, -player.dir, player.streetCoord);
+  if(Math.abs(player.speed) > UTURN_MAX_SPEED) player.speed = Math.sign(player.speed) * UTURN_MAX_SPEED;
+}
+// second press while the first turn is mid-corner: carry that arc on round
+function extendToUTurn(at){
+  if(!uTurnAllowed()){ showBanner('NO U-TURN HERE', 1.2); return; }
+  setUTurnArc(at);
+}
+// second press before the junction: start the U-turn from scratch
+function startUTurn(side){
+  if(!uTurnAllowed()){ showBanner('NO U-TURN HERE', 1.2); return; }
+  player.arcTurn = {side, uturn: false, sweep: 0, target: Math.PI, radius: UTURN_RADIUS,
+    turnSign: side==='right' ? 1 : -1};
+  setUTurnArc(player.arcTurn);
 }
 
 // checked every frame while a turn is armed: fires the turn the moment
@@ -2902,8 +2948,10 @@ function updatePendingTurn(){
   const lines = player.axis==='z' ? streetLinesZ : streetLinesX;
   const line = lines.find(l => Math.abs(noseForward-l) < JUNCTION_WINDOW);
   if(line !== undefined){
-    turnPlayer(player.pendingTurn, Math.abs(noseForward-line) / JUNCTION_WINDOW);
+    if(player.pendingUTurn) startUTurn(player.pendingTurn);
+    else turnPlayer(player.pendingTurn, Math.abs(noseForward-line) / JUNCTION_WINDOW);
     player.pendingTurn = null;
+    player.pendingUTurn = false;
   }
 }
 
@@ -3039,7 +3087,7 @@ function updatePlayer(dt){
   // falls back to the old lane-settle heading-gap version.
   const speedFrac = clamp(Math.abs(player.speed)/player.maxSpeed, 0, 1);
   player.roll = player.arcTurn
-    ? player.arcTurn.turnSign * (1 - player.arcTurn.sweep/(Math.PI/2)) * 0.26 * speedFrac
+    ? player.arcTurn.turnSign * (1 - player.arcTurn.sweep/player.arcTurn.target) * 0.26 * speedFrac
     : clamp(headingGap/(Math.PI/2), -1, 1) * 0.26 * speedFrac;
   if(player.hop) player.roll = player.hop.tilt;
 
@@ -3076,14 +3124,14 @@ function updatePlayer(dt){
   let nx, nz, fixedCoord;
   if(player.arcTurn){
     const at = player.arcTurn;
-    let dHeading = (player.speed / CORNER_RADIUS) * at.turnSign * dt;
-    const remaining = Math.PI/2 - at.sweep;
+    let dHeading = (player.speed / at.radius) * at.turnSign * dt;
+    const remaining = at.target - at.sweep;
     if(Math.abs(dHeading) > remaining) dHeading = remaining * (dHeading < 0 ? -1 : 1);
     player.heading += dHeading;
     at.sweep += Math.abs(dHeading);
     nx = player.x + Math.sin(player.heading)*player.speed*dt;
     nz = player.z + Math.cos(player.heading)*player.speed*dt;
-    if(at.sweep >= Math.PI/2 - 1e-6){
+    if(at.sweep >= at.target - 1e-6){
       player.axis = at.nextAxis;
       player.dir = at.nextDir;
       player.lane = at.nextLane;
