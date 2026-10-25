@@ -484,6 +484,7 @@ let donutPads = [];   // same shape as gasPads, recoloured — see spawnDonutBre
 let garages = [];     // {x,z,doorOpen,entrance} — cars occasionally pull in/out, see updateGarages
 let roadMarks = [];   // {x1,x2,z1,z2} dashed centerline segments
 let lotDecals = [];   // {x1,x2,z1,z2,color} flat ground rectangles: garage car park asphalt and its bay dividers
+let parkedCars = [];  // kerb-side parked cars on some minor streets: drawn and solid, never driven (see generateCity)
 let stopLines = [];   // {x1,x2,z1,z2} solid stop-line markings, one per approach to a signalled junction
 let walls = [];        // perimeter wall segments, same shape as a building box
 let roundabouts = [];  // {x,z,r} — see ROUNDABOUTS_ENABLED
@@ -1195,6 +1196,41 @@ function generateCity(seed){
       billboards.push({x: pos.x, z: pos.z, facing: side.facing, slogan});
     }
   }
+
+  // English-style kerb parking: on some minor streets a row of cars is parked
+  // against the kerb, out past the traffic lanes, so the road itself never
+  // blocks. Arterials and the perimeter loop are left alone
+  parkedCars = [];
+  const parkRnd = mulberry32(seed + 3131);
+  const PARK_LATERAL = 34, PARK_EDGE = 40, PARK_CHANCE = 0.12;
+  for(let i=1;i<BLOCKS_X;i++){
+    if(isArterialX[i]) continue;
+    for(let j=0;j<BLOCKS_Z;j++){
+      if(parkRnd() > PARK_CHANCE) continue;
+      const side = parkRnd() < 0.5 ? -1 : 1;
+      const segStart = streetLinesZ[j]+roadHalfZ[j]+PARK_EDGE, segEnd = streetLinesZ[j+1]-roadHalfZ[j+1]-PARK_EDGE;
+      if(segEnd - segStart < 30) continue;
+      const count = 1 + Math.floor(parkRnd()*2);
+      for(let k=0;k<count;k++){
+        const z = segStart + (segEnd-segStart)*(k+0.5)/count;
+        parkedCars.push(parkedCarAt(streetLinesX[i] + side*PARK_LATERAL, z, 'z', side, parkRnd));
+      }
+    }
+  }
+  for(let j=1;j<BLOCKS_Z;j++){
+    if(isArterialZ[j]) continue;
+    for(let i=0;i<BLOCKS_X;i++){
+      if(parkRnd() > PARK_CHANCE) continue;
+      const side = parkRnd() < 0.5 ? -1 : 1;
+      const segStart = streetLinesX[i]+roadHalfX[i]+PARK_EDGE, segEnd = streetLinesX[i+1]-roadHalfX[i+1]-PARK_EDGE;
+      if(segEnd - segStart < 30) continue;
+      const count = 1 + Math.floor(parkRnd()*2);
+      for(let k=0;k<count;k++){
+        const x = segStart + (segEnd-segStart)*(k+0.5)/count;
+        parkedCars.push(parkedCarAt(x, streetLinesZ[j] + side*PARK_LATERAL, 'x', side, parkRnd));
+      }
+    }
+  }
 }
 
 // null if `line` isn't a one-way street for this axis, else the one
@@ -1229,6 +1265,15 @@ function nearestStreet(list, v){
 // ---------------------------------------------------------------
 // Entities
 // ---------------------------------------------------------------
+// a car parked facing the way `side` points along `axis`. Never updated by
+// the traffic logic, so it just sits where it was put
+function parkedCarAt(x, z, axis, side, rnd){
+  const color = CIVILIAN_COLORS[Math.floor(rnd()*CIVILIAN_COLORS.length)];
+  const c = makeCar(x, z, cardinalHeading(axis, side), color, 0);
+  c.axis = axis; c.dir = side; c.parked = true;
+  return c;
+}
+
 function makeCar(x,z,heading,color,maxSpeed){
   return {x,z,heading,targetHeading:heading,speed:0,color,maxSpeed,type:'car',
            axis:'z', dir:1, turnCooldown:0, alive:true,
@@ -3387,6 +3432,14 @@ function collideWorld(x, z, r, ignoreMedians, ignoreCar){
     const along = c.axis==='z' ? Math.abs(dz) : Math.abs(dx);
     const across = c.axis==='z' ? Math.abs(dx) : Math.abs(dz);
     if(along < Math.max(longMargin, vehicleHalfLength(c)+2) && across < latMargin){ lastVehicleHit = c; return true; }
+  }
+  // parked cars: kept off the traffic list so traffic never steers round them,
+  // but still solid to the player
+  for(const c of parkedCars){
+    const dx = x-c.x, dz = z-c.z;
+    const along = c.axis==='z' ? Math.abs(dz) : Math.abs(dx);
+    const across = c.axis==='z' ? Math.abs(dx) : Math.abs(dz);
+    if(along < vehicleHalfLength(c) + r && across < r + 3){ lastVehicleHit = c; return true; }
   }
   if(suspect){
     const dx = x-suspect.x, dz = z-suspect.z;
@@ -7361,7 +7414,7 @@ function drawScene(){
       }
     }
   }
-  for(const car of allCars()){
+  for(const car of [...allCars(), ...parkedCars]){
     if(car===player && (cameraMode==='incar' || playerWrecked)) continue;
     // AI driving logic still runs city-wide every frame (see update()) —
     // this only skips building and projecting the full 3D quad set for a
