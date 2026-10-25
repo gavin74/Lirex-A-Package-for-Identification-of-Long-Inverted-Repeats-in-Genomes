@@ -1202,7 +1202,7 @@ function generateCity(seed){
   // blocks. Arterials and the perimeter loop are left alone
   parkedCars = [];
   const parkRnd = mulberry32(seed + 3131);
-  const PARK_LATERAL = 34, PARK_EDGE = 40, PARK_CHANCE = 0.12;
+  const PARK_EDGE = 40, PARK_CHANCE = 0.12;
   for(let i=1;i<BLOCKS_X;i++){
     if(isArterialX[i]) continue;
     for(let j=0;j<BLOCKS_Z;j++){
@@ -1213,7 +1213,7 @@ function generateCity(seed){
       const count = 1 + Math.floor(parkRnd()*2);
       for(let k=0;k<count;k++){
         const z = segStart + (segEnd-segStart)*(k+0.5)/count;
-        parkedCars.push(parkedCarAt(streetLinesX[i] + side*PARK_LATERAL, z, 'z', side, parkRnd));
+        parkedCars.push(parkedCarAt('z', streetLinesX[i], z, side, parkRnd));
       }
     }
   }
@@ -1227,7 +1227,7 @@ function generateCity(seed){
       const count = 1 + Math.floor(parkRnd()*2);
       for(let k=0;k<count;k++){
         const x = segStart + (segEnd-segStart)*(k+0.5)/count;
-        parkedCars.push(parkedCarAt(x, streetLinesZ[j] + side*PARK_LATERAL, 'x', side, parkRnd));
+        parkedCars.push(parkedCarAt('x', streetLinesZ[j], x, side, parkRnd));
       }
     }
   }
@@ -1267,10 +1267,16 @@ function nearestStreet(list, v){
 // ---------------------------------------------------------------
 // a car parked facing the way `side` points along `axis`. Never updated by
 // the traffic logic, so it just sits where it was put
-function parkedCarAt(x, z, axis, side, rnd){
+// it sits in the lane of its own direction, so traffic in that lane has to
+// swing round it (see obstacleAvoidOffset). laneSign is which side of the
+// street that lane is on
+function parkedCarAt(axis, line, along, side, rnd){
+  const laneSign = correctLane(axis, side, line);
+  const lat = line + laneSign*LANE_OFFSET;
+  const x = axis==='z' ? lat : along, z = axis==='z' ? along : lat;
   const color = CIVILIAN_COLORS[Math.floor(rnd()*CIVILIAN_COLORS.length)];
   const c = makeCar(x, z, cardinalHeading(axis, side), color, 0);
-  c.axis = axis; c.dir = side; c.parked = true;
+  c.axis = axis; c.dir = side; c.parked = true; c.laneSign = laneSign;
   return c;
 }
 
@@ -3542,6 +3548,22 @@ function obstacleAvoidOffset(car){
     else t = 1;
     return avoidAmount * t;
   }
+  // a parked car in this car's own lane: swing out into the other lane a
+  // little before it and back in after, same shape as the roadworks dodge
+  if(car !== player) for(const c of parkedCars){
+    if(c.axis !== car.axis || c.dir !== car.dir) continue;
+    const cLat = car.axis==='z' ? c.x : c.z;
+    if(Math.abs(car.laneHome - cLat) > 6) continue;
+    const cFwd = car.axis==='z' ? c.z : c.x;
+    const lookAhead = 45, lookPast = 14;
+    const winStart = cFwd - 8 - lookAhead, winEnd = cFwd + 8 + lookPast;
+    if(forward < winStart || forward > winEnd) continue;
+    let t;
+    if(forward < cFwd - 8) t = smoothstep(clamp((forward-winStart)/lookAhead,0,1));
+    else if(forward > cFwd + 8) t = smoothstep(clamp((winEnd-forward)/lookPast,0,1));
+    else t = 1;
+    return -c.laneSign * 22 * t;
+  }
   if(ROUNDABOUTS_ENABLED){
     for(const rb of roundabouts){
       const rbForward = car.axis==='z' ? rb.z : rb.x;
@@ -3795,7 +3817,12 @@ function updateStreetCar(car, dt){
     const oCross = car.axis==='z' ? other.x : other.z;
     const aheadDist = (oForward - forward) * car.dir;
     const lateralGap = Math.abs(crossPos - oCross);
-    if(aheadDist > 0 && aheadDist < BRAKE_DIST && lateralGap < 13 && aheadDist < nearestAhead){
+    // oncoming traffic only counts once the two bodies could actually meet.
+    // Otherwise a car swinging round a parked car stops dead for the car
+    // coming the other way, which stops dead for it in turn
+    const opposing = other.axis === car.axis && other.dir !== car.dir;
+    const latLimit = opposing ? 6 : 13;
+    if(aheadDist > 0 && aheadDist < BRAKE_DIST && lateralGap < latLimit && aheadDist < nearestAhead){
       nearestAhead = aheadDist;
       nearestIsPlayer = other === player;
       nearestLateralGap = lateralGap;
